@@ -343,7 +343,17 @@ public partial class MainForm : Form
 
         var interval = (int)_nudInterval.Value * 1000;
         _timer = new System.Windows.Forms.Timer { Interval = interval };
-        _timer.Tick += async (_, _) => await RunApprovalCycleAsync();
+        _timer.Tick += async (_, _) =>
+        {
+            try
+            {
+                await RunApprovalCycleAsync();
+            }
+            catch (Exception ex)
+            {
+                Log($"❌ Unhandled error in approval cycle: {ex.Message}", Color.Red);
+            }
+        };
         _timer.Start();
 
         _btnStart.Enabled = false;
@@ -394,7 +404,7 @@ public partial class MainForm : Form
                 return;
             }
 
-            Log($"\n{'─'.ToString().PadLeft(60, '─')}", Color.DarkGray);
+            Log($"\n{new string('─', 60)}", Color.DarkGray);
             Log($"🔍 [{DateTime.Now:HH:mm:ss}] Checking for pending approvals: {owner}/{repo}",
                 Color.Cyan);
 

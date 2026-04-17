@@ -37,9 +37,10 @@ public sealed class AppSettings
                 return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore deserialization errors, return defaults
+            // Settings file may be corrupted; return defaults so the app can still start.
+            System.Diagnostics.Debug.WriteLine($"[AppSettings] Failed to load: {ex.Message}");
         }
         return new AppSettings();
     }
@@ -53,9 +54,10 @@ public sealed class AppSettings
             var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(SettingsPath, json);
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore save errors silently
+            // Non-critical: settings won't persist, but the app continues to function.
+            System.Diagnostics.Debug.WriteLine($"[AppSettings] Failed to save: {ex.Message}");
         }
     }
 }

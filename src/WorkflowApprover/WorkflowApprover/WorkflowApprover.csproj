@@ -1,5 +1,9 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- This standalone tool targets .NET 8.0 (not .NET 10) because:
+       1. WebView2 SDK is most stable on .NET 8 LTS
+       2. This is a Windows desktop utility, not part of the PatientApi backend
+       3. .NET 8 is the current LTS version with best WinForms/WebView2 support -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>

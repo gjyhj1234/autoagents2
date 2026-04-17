@@ -41,7 +41,15 @@ public sealed class GitHubApiClient : IDisposable
             if (!response.IsSuccessStatusCode)
             {
                 var errorBody = await response.Content.ReadAsStringAsync(ct);
-                throw new Exception($"GitHub API returned {(int)response.StatusCode}: {errorBody}");
+                var statusCode = (int)response.StatusCode;
+                var hint = statusCode switch
+                {
+                    401 => " (check your GitHub token)",
+                    403 => " (rate limit exceeded — set a GitHub token or wait)",
+                    404 => " (repository not found — check owner/repo)",
+                    _ => ""
+                };
+                throw new Exception($"GitHub API returned {statusCode}{hint}: {errorBody}");
             }
 
             var json = await response.Content.ReadAsStringAsync(ct);
