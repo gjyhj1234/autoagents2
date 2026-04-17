@@ -68,7 +68,10 @@ public class PatientRepository
         cmd.Parameters.AddWithValue("address", (object?)request.Address ?? DBNull.Value);
 
         await using var reader = await cmd.ExecuteReaderAsync();
-        await reader.ReadAsync();
+        if (!await reader.ReadAsync())
+        {
+            throw new InvalidOperationException("Failed to create patient: no row returned.");
+        }
         return MapPatient(reader);
     }
 

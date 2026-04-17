@@ -25,7 +25,7 @@ var app = builder.Build();
 app.UseCors();
 
 var connectionString = Environment.GetEnvironmentVariable("CONNECTION_STRING")
-    ?? "Host=localhost;Database=patientdb;Username=postgres;Password=postgres";
+    ?? throw new InvalidOperationException("CONNECTION_STRING environment variable is not set.");
 
 var repo = new PatientRepository(connectionString);
 
@@ -49,6 +49,13 @@ app.MapGet("/api/patients/{id:guid}", async (Guid id) =>
 // POST /api/patients
 app.MapPost("/api/patients", async (CreatePatientRequest request) =>
 {
+    if (string.IsNullOrWhiteSpace(request.Name) ||
+        string.IsNullOrWhiteSpace(request.Gender) ||
+        string.IsNullOrWhiteSpace(request.Phone))
+    {
+        return Results.BadRequest("Name, Gender, and Phone are required.");
+    }
+
     var patient = await repo.CreateAsync(request);
     return Results.Created($"/api/patients/{patient.Id}", patient);
 });
@@ -56,6 +63,13 @@ app.MapPost("/api/patients", async (CreatePatientRequest request) =>
 // PUT /api/patients/{id}
 app.MapPut("/api/patients/{id:guid}", async (Guid id, UpdatePatientRequest request) =>
 {
+    if (string.IsNullOrWhiteSpace(request.Name) ||
+        string.IsNullOrWhiteSpace(request.Gender) ||
+        string.IsNullOrWhiteSpace(request.Phone))
+    {
+        return Results.BadRequest("Name, Gender, and Phone are required.");
+    }
+
     var patient = await repo.UpdateAsync(id, request);
     return patient is not null ? Results.Ok(patient) : Results.NotFound();
 });
