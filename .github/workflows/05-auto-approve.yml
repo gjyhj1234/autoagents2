@@ -2,8 +2,18 @@ name: 🔓 05 — Auto Approve Workflow Runs
 
 # ────────────────────────────────────────────────────────────────
 # Safety-net workflow that automatically approves pending CI runs
-# for Copilot branches. Uses `workflow_run` trigger so it always
-# runs on the default branch context (no approval needed itself).
+# for Copilot branches.  Uses `workflow_run` trigger so it runs on
+# the default branch context (no approval needed itself after the
+# very first run is manually approved).
+#
+# ⚠️ IMPORTANT LIMITATION:
+# The REST API `POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve`
+# only works for **fork** pull requests.  For same-repo Copilot PRs
+# it returns "This run is not from a fork pull request".
+#
+# The primary fix for same-repo PRs is to use pull_request_target
+# in Workflow 02 (PR Tests).  This workflow is kept as a safety net
+# for any future fork-based PRs.
 # ────────────────────────────────────────────────────────────────
 on:
   workflow_run:
@@ -26,7 +36,7 @@ jobs:
       - name: Wait for run to enter approval queue
         run: sleep 10
 
-      - name: Approve the pending workflow run
+      - name: Approve the pending workflow run (fork PRs only)
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.COPILOT_PAT }}
@@ -37,28 +47,35 @@ jobs:
             const runName = context.payload.workflow_run.name;
             const branch = context.payload.workflow_run.head_branch;
 
-            console.log(`Attempting to approve run #${runId} (${runName}) on branch ${branch}`);
+            console.log(`Checking run #${runId} (${runName}) on branch ${branch}`);
 
-            // Retry loop — the run may not yet be in action_required state
             const maxAttempts = 6;
             const delayMs = 10_000;
 
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
               try {
-                // Check current run status
                 const { data: run } = await github.rest.actions.getWorkflowRun({
                   owner, repo, run_id: runId,
                 });
 
-                if (run.status === 'action_required') {
-                  await github.rest.actions.approveWorkflowRun({ owner, repo, run_id: runId });
-                  console.log(`✅ Approved run #${runId} on attempt ${attempt}`);
-                  return;
-                }
-
                 if (run.status === 'completed' || run.status === 'in_progress' || run.status === 'queued') {
                   console.log(`Run #${runId} is already ${run.status} — no approval needed.`);
                   return;
+                }
+
+                if (run.status === 'action_required') {
+                  try {
+                    await github.rest.actions.approveWorkflowRun({ owner, repo, run_id: runId });
+                    console.log(`✅ Approved run #${runId} on attempt ${attempt}`);
+                    return;
+                  } catch (e) {
+                    // Expected for same-repo PRs — the API only works for fork PRs
+                    if (e.message.includes('not from a fork')) {
+                      console.log(`Run #${runId} is not from a fork PR — approve API not applicable. Workflow 02 should use pull_request_target instead.`);
+                      return;
+                    }
+                    throw e;
+                  }
                 }
 
                 console.log(`[attempt ${attempt}] Run status is '${run.status}', waiting…`);
@@ -72,35 +89,3 @@ jobs:
             }
 
             console.log(`⚠️ Could not approve run #${runId} after ${maxAttempts} attempts.`);
-
-      # Also approve any other pending runs for the same head SHA
-      - name: Approve other pending runs for this SHA
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.COPILOT_PAT }}
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const headSha = context.payload.workflow_run.head_sha;
-
-            const { data: runsData } = await github.rest.actions.listWorkflowRunsForRepo({
-              owner,
-              repo,
-              head_sha: headSha,
-              status: 'action_required',
-              per_page: 50,
-            });
-
-            for (const run of runsData.workflow_runs) {
-              console.log(`Approving additional pending run #${run.id} (${run.name})`);
-              try {
-                await github.rest.actions.approveWorkflowRun({ owner, repo, run_id: run.id });
-                console.log(`  ✅ Approved run #${run.id}`);
-              } catch (e) {
-                console.log(`  ❌ Could not approve run #${run.id}: ${e.message}`);
-              }
-            }
-
-            if (runsData.total_count === 0) {
-              console.log('No additional pending runs to approve.');
-            }

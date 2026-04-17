@@ -21,6 +21,7 @@ permissions:
   pull-requests: write
   issues: write
   checks: read
+  statuses: read
   actions: write
 
 jobs:
@@ -144,6 +145,26 @@ jobs:
                 continue;
               }
 
+              // ── Check commit statuses (set by pull_request_target workflow 02) ──
+              const { data: combinedStatus } = await github.rest.repos.getCombinedStatusForRef({
+                owner, repo, ref: pr.head.sha,
+              });
+
+              const ciStatus = combinedStatus.statuses.find(s => s.context === 'ci/pr-tests');
+              if (ciStatus) {
+                if (ciStatus.state === 'pending') {
+                  console.log(`  Skipping — ci/pr-tests status is pending`);
+                  continue;
+                }
+                if (ciStatus.state === 'failure' || ciStatus.state === 'error') {
+                  console.log(`  Skipping — ci/pr-tests status is ${ciStatus.state}`);
+                  continue;
+                }
+                // ciStatus.state === 'success' → proceed to merge
+                console.log(`  ci/pr-tests commit status: ${ciStatus.state}`);
+              }
+
+              // ── Check check runs (from pull_request-triggered or external CI) ──
               const { data: checkRuns } = await github.rest.checks.listForRef({
                 owner, repo, ref: pr.head.sha, per_page: 100,
               });
@@ -152,23 +173,33 @@ jobs:
               const excludedPatterns = [
                 'Auto Merge', 'auto-merge', 'Auto-Merge', 'Evaluate PRs',
                 'Label', 'Auto-approve', 'approve Copilot',
+                'Post Test Summary',
               ];
               const relevantChecks = checkRuns.check_runs.filter(
                 c => !excludedPatterns.some(p => c.name.includes(p))
               );
 
-              const allCompleted = relevantChecks.every(c => c.status === 'completed');
-              const allPassed = relevantChecks.every(
-                c => c.conclusion === 'success' || c.conclusion === 'skipped' || c.conclusion === 'neutral'
-              );
+              if (relevantChecks.length > 0) {
+                const allCompleted = relevantChecks.every(c => c.status === 'completed');
+                const allPassed = relevantChecks.every(
+                  c => c.conclusion === 'success' || c.conclusion === 'skipped' || c.conclusion === 'neutral'
+                );
 
-              if (!allCompleted) {
-                console.log(`  Skipping — checks not yet complete`);
-                continue;
+                if (!allCompleted) {
+                  console.log(`  Skipping — checks not yet complete`);
+                  continue;
+                }
+
+                if (!allPassed) {
+                  console.log(`  Skipping — some checks failed`);
+                  continue;
+                }
               }
 
-              if (!allPassed) {
-                console.log(`  Skipping — some checks failed`);
+              // If we have neither a ci/pr-tests status nor any relevant check
+              // runs, the tests have not run yet — skip this PR.
+              if (!ciStatus && relevantChecks.length === 0) {
+                console.log(`  Skipping — no CI status or check runs found yet`);
                 continue;
               }
 
