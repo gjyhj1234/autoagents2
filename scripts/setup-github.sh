@@ -1,23 +1,7 @@
 #!/usr/bin/env bash
-# =============================================================================
-# setup-github.sh — One-time repository setup for the automated pipeline
-#
-# USAGE:
-#   bash scripts/setup-github.sh
-#
-# REQUIRES:
-#   - GitHub CLI: https://cli.github.com  (gh auth login first)
-#   - Must run from the root of the autoagents repository
-# =============================================================================
-
 set -euo pipefail
 
-REPO="gjyhj1234/autoagents"
-echo "🦷 Setting up GitHub repository: $REPO"
-echo ""
-
-# ─── 1. Create Labels ────────────────────────────────────────────────────────
-echo "📌 Creating labels..."
+REPO="gjyhj1234/autoagents2"
 
 create_label() {
   local name="$1" color="$2" description="$3"
@@ -25,129 +9,141 @@ create_label() {
      --repo "$REPO" 2>/dev/null \
     || gh label edit "$name" --color "$color" --description "$description" \
        --repo "$REPO" 2>/dev/null \
-    || echo "  ⚠️  Skipping label: $name"
-  echo "  ✅ $name"
+    || true
 }
 
-create_label "agent-task"        "0075ca" "Task ready for Copilot Coding Agent — triggers automation pipeline"
+create_label "agent-task"        "0075ca" "Task ready for Copilot Coding Agent"
 create_label "agent-in-progress" "e4e669" "Copilot Agent is currently working on this issue"
-create_label "agent-queued"      "fbca04" "Task is queued and waiting for Copilot to pick it up"
+create_label "agent-queued"      "fbca04" "Task is queued and waiting for Copilot"
 create_label "agent-completed"   "0e8a16" "Agent task completed and merged"
 create_label "auto-merge"        "6f42c1" "PR will be auto-merged after all checks pass"
-create_label "infrastructure"    "d4c5f9" "Docker, CI/CD, DevOps"
-create_label "database"          "c5def5" "Database schema, migrations"
 create_label "backend"           "bfd4f2" ".NET 10 backend API"
 create_label "frontend"          "d2f5b0" "Vue 3 frontend"
-create_label "testing"           "f9d0c4" "Tests and QA"
+create_label "database"          "c5def5" "Database schema"
 
-echo ""
-
-# ─── 2. Enable Auto-Merge on Repository ──────────────────────────────────────
-echo "🔀 Enabling auto-merge..."
 gh api repos/"$REPO" \
   --method PATCH \
   -f allow_auto_merge=true \
   -f delete_branch_on_merge=true \
-  --silent && echo "  ✅ Auto-merge enabled; branches will be deleted after merge"
+  --silent 2>/dev/null || true
 
-echo ""
+# Issue 1
+gh issue create --repo "$REPO" \
+  --title "[Task-01] Database Schema and Init SQL" \
+  --label "agent-task,database" \
+  --body '## Objective
+Create the PostgreSQL database init script.
 
-# ─── 3. Create Milestones ────────────────────────────────────────────────────
-echo "🎯 Creating milestones..."
+## Requirements
+- [ ] Create `database/init.sql` with the `patients` table DDL
+- [ ] Table columns: `id` (UUID PK, default gen_random_uuid()), `name` (VARCHAR 100 NOT NULL), `gender` (VARCHAR 10 NOT NULL), `date_of_birth` (DATE NOT NULL), `phone` (VARCHAR 20 NOT NULL), `address` (VARCHAR 200 nullable), `created_at` (TIMESTAMPTZ NOT NULL DEFAULT now()), `updated_at` (TIMESTAMPTZ NOT NULL DEFAULT now())
+- [ ] Add a few INSERT statements as seed data (3-5 sample patients)
 
-create_milestone() {
-  local title="$1" description="$2"
-  gh api repos/"$REPO"/milestones \
-    --method POST \
-    -f title="$title" \
-    -f description="$description" \
-    --silent 2>/dev/null && echo "  ✅ $title" || echo "  ⏭️  $title (may already exist)"
-}
+## Acceptance Criteria
+- [ ] `init.sql` is valid PostgreSQL syntax
+- [ ] Table uses UUID primary key'
 
-create_milestone "Sprint 1 — Infrastructure & Backend"  "Tasks 01–06: project setup, database, all backend APIs"
-create_milestone "Sprint 2 — Frontend"                  "Tasks 07–11: Vue frontend, dental chart, perio, treatment"
-create_milestone "Sprint 3 — Polish & Testing"          "Task 12: reporting, PDF, integration tests"
+# Issue 2
+gh issue create --repo "$REPO" \
+  --title "[Task-02] Backend .NET 10 AOT Patient API" \
+  --label "agent-task,backend" \
+  --body '## Objective
+Create the .NET 10 AOT Minimal API backend for patient CRUD.
 
-echo ""
+## Requirements
+- [ ] Create `src/backend/PatientApi/` project using `dotnet new web`
+- [ ] Target .NET 10, enable PublishAot in csproj
+- [ ] Use `Npgsql` for database access (NO EF Core, NO Dapper, NO ORM)
+- [ ] Use `System.Text.Json` source generation for AOT compatibility
+- [ ] Read connection string from environment variable `CONNECTION_STRING`
+- [ ] Implement Minimal API endpoints:
+  - `GET /api/patients` — list all patients
+  - `POST /api/patients` — create patient
+  - `GET /api/patients/{id}` — get patient by ID
+  - `PUT /api/patients/{id}` — update patient
+  - `DELETE /api/patients/{id}` — delete patient
+  - `GET /health` — health check
+- [ ] All SQL queries must use parameterized queries
+- [ ] Enable CORS for all origins (demo purpose)
+- [ ] Create a `PatientApi.sln` solution file in `src/backend/`
 
-# ─── 4. Create GitHub Issues (Tasks 01–12) ───────────────────────────────────
-echo "📋 Creating task issues..."
+## Acceptance Criteria
+- [ ] `dotnet build` succeeds
+- [ ] API endpoints work correctly
+- [ ] No EF Core or ORM dependencies
 
-create_issue() {
-  local number="$1" title="$2" labels="$3" milestone="$4" body_file="$5"
-  
-  if [ -f "$body_file" ]; then
-    gh issue create \
-      --repo "$REPO" \
-      --title "[Task-$(printf '%02d' $number)] $title" \
-      --label "$labels" \
-      --milestone "$milestone" \
-      --body-file "$body_file" \
-    && echo "  ✅ Issue #$number: $title" \
-    || echo "  ⚠️  Failed to create issue: $title"
-  else
-    echo "  ⚠️  Body file not found: $body_file — creating minimal issue"
-    gh issue create \
-      --repo "$REPO" \
-      --title "[Task-$(printf '%02d' $number)] $title" \
-      --label "$labels" \
-      --milestone "$milestone" \
-      --body "See \`docs/tasks/$(printf '%02d' $number)-*.md\` for full specification." \
-    && echo "  ✅ Issue #$number: $title"
-  fi
-}
+## Depends On
+#ISSUE1'
 
-create_issue 1  "Project Infrastructure Setup"                   "agent-task,infrastructure"      "Sprint 1 — Infrastructure & Backend"  "docs/tasks/01-infrastructure.md"
-create_issue 2  "Database Schema and Migrations"                  "agent-task,database"             "Sprint 1 — Infrastructure & Backend"  "docs/tasks/02-database-schema.md"
-create_issue 3  "Backend: JWT Authentication and Patient CRUD API" "agent-task,backend"              "Sprint 1 — Infrastructure & Backend"  "docs/tasks/03-backend-auth-patients.md"
-create_issue 4  "Backend: Dental Chart and Tooth Conditions API"  "agent-task,backend"              "Sprint 1 — Infrastructure & Backend"  "docs/tasks/04-backend-dental-chart-api.md"
-create_issue 5  "Backend: Treatment Planning and Periodontal Chart API" "agent-task,backend"         "Sprint 1 — Infrastructure & Backend"  "docs/tasks/05-backend-treatment-perio.md"
-create_issue 6  "Backend: Appointment Scheduling and Procedure Codes API" "agent-task,backend"       "Sprint 1 — Infrastructure & Backend"  "docs/tasks/06-backend-appointments-codes.md"
-create_issue 7  "Frontend: Vue 3 Project Setup, Auth, and App Shell" "agent-task,frontend"           "Sprint 2 — Frontend"                   "docs/tasks/07-frontend-setup.md"
-create_issue 8  "Frontend: Interactive SVG Dental Chart Component"  "agent-task,frontend"            "Sprint 2 — Frontend"                   "docs/tasks/08-frontend-dental-chart.md"
-create_issue 9  "Frontend: Treatment Planning Editor"               "agent-task,frontend"            "Sprint 2 — Frontend"                   "docs/tasks/09-frontend-treatment-plan.md"
-create_issue 10 "Frontend: Periodontal Chart Grid and Trend Visualization" "agent-task,frontend"     "Sprint 2 — Frontend"                   "docs/tasks/10-frontend-perio-chart.md"
-create_issue 11 "Frontend: Patient Detail, Medical History, and Appointment Scheduling" "agent-task,frontend" "Sprint 2 — Frontend" "docs/tasks/11-frontend-patients-appointments.md"
-create_issue 12 "Reporting, PDF Export, and End-to-End Integration Tests" "agent-task,testing"       "Sprint 3 — Polish & Testing"           "docs/tasks/12-reporting-testing.md"
+# Issue 3
+gh issue create --repo "$REPO" \
+  --title "[Task-03] Backend Unit Tests" \
+  --label "agent-task,backend" \
+  --body '## Objective
+Add xUnit tests for the backend API.
 
-echo ""
-echo "🚀 Starting the issue queue workflow..."
-workflow_output="$(gh workflow run "01-issue-agent.yml" --repo "$REPO" 2>&1)" \
-  && echo "  ✅ Workflow 01 queued successfully" \
-  || {
-    echo "  ⚠️  Could not start Workflow 01 automatically; run it once from the Actions page"
-    echo "     $workflow_output"
-  }
+## Requirements
+- [ ] Create `src/backend/PatientApi.Tests/` xUnit test project
+- [ ] Add project to `PatientApi.sln`
+- [ ] Test patient model serialization/deserialization
+- [ ] Test API endpoint routing using `WebApplicationFactory` (integration tests, may use in-memory or mock)
+- [ ] At least 5 test cases
 
-# ─── 5. Check for COPILOT_PAT Secret ─────────────────────────────────────────
-echo ""
-echo "🔑 Checking for COPILOT_PAT secret..."
-pat_check=$(gh secret list --repo "$REPO" 2>/dev/null | grep -c "COPILOT_PAT" || true)
-if [ "$pat_check" -eq 0 ]; then
-  echo "  ⚠️  COPILOT_PAT secret NOT found!"
-  echo ""
-  echo "  ╔══════════════════════════════════════════════════════════════╗"
-  echo "  ║  IMPORTANT: Copilot auto-assignment requires a Personal    ║"
-  echo "  ║  Access Token (PAT) stored as the COPILOT_PAT secret.      ║"
-  echo "  ║  Without it, you must manually assign Copilot to issues.   ║"
-  echo "  ║                                                             ║"
-  echo "  ║  See: docs/setup-copilot-pat.md for instructions.          ║"
-  echo "  ╚══════════════════════════════════════════════════════════════╝"
-  echo ""
-else
-  echo "  ✅ COPILOT_PAT secret found"
-fi
+## Acceptance Criteria
+- [ ] `dotnet test` passes all tests
+- [ ] Tests cover basic CRUD logic
 
-echo ""
-echo "============================================================"
-echo "✅ Repository setup complete!"
-echo ""
-echo "Next steps:"
-echo "  1. REQUIRED: Create COPILOT_PAT secret if not done yet"
-echo "     See docs/setup-copilot-pat.md for step-by-step instructions"
-echo "  2. Go to: https://github.com/$REPO/issues"
-echo "  3. All 12 issues were created with the 'agent-task' label already applied"
-echo "  4. Workflow 01 will use COPILOT_PAT to assign Copilot to the first issue"
-echo "  5. Monitor Actions tab: https://github.com/$REPO/actions"
-echo "  6. After each PR is merged, the next issue is automatically picked up"
-echo "============================================================"
+## Depends On
+#ISSUE2'
+
+# Issue 4
+gh issue create --repo "$REPO" \
+  --title "[Task-04] Frontend Vue 3 Project Setup and Patient List Page" \
+  --label "agent-task,frontend" \
+  --body '## Objective
+Create the Vue 3 + TypeScript frontend with patient list page.
+
+## Requirements
+- [ ] Create `src/frontend/` using Vite + Vue 3 + TypeScript scaffold
+- [ ] Install dependencies: `vue-router`, `pinia`, `axios`, `element-plus`
+- [ ] Create TypeScript type `Patient` in `src/types/patient.ts`
+- [ ] Create API service `src/services/patientApi.ts` using axios
+- [ ] Create Pinia store `src/stores/patientStore.ts`
+- [ ] Create `PatientList.vue` page with Element Plus table, search input, add/edit/delete buttons
+- [ ] Create `PatientForm.vue` component (dialog/modal for create/edit patient with fields: name, gender, DOB, phone, address)
+- [ ] Configure Vue Router with routes: `/` → PatientList
+- [ ] Configure axios base URL from environment variable `VITE_API_BASE_URL` (default `http://localhost:5000`)
+
+## Acceptance Criteria
+- [ ] `npm run build` succeeds
+- [ ] Patient list page renders correctly
+- [ ] CRUD operations work when backend is running
+
+## Depends On
+#ISSUE2'
+
+# Issue 5
+gh issue create --repo "$REPO" \
+  --title "[Task-05] Frontend Tests and README" \
+  --label "agent-task,frontend" \
+  --body '## Objective
+Add frontend tests and update the project README.
+
+## Requirements
+- [ ] Install Vitest and Vue Test Utils as dev dependencies
+- [ ] Add `test` script to `package.json`
+- [ ] Write tests for `patientStore.ts` (at least 2 test cases)
+- [ ] Write a component test for `PatientList.vue` (at least 1 test case)
+- [ ] Update `README.md` in the repository root with:
+  - Project description (Patient Management Demo)
+  - Tech stack (.NET 10 AOT + Vue 3 + TypeScript + PostgreSQL)
+  - How to run the backend
+  - How to run the frontend
+  - API endpoint list
+
+## Acceptance Criteria
+- [ ] `npm run test` passes
+- [ ] README is complete and accurate
+
+## Depends On
+#ISSUE4'

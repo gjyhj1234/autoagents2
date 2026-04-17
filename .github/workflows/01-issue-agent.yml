@@ -1,19 +1,5 @@
 name: 🤖 01 — Issue → Agent
 
-# ═══════════════════════════════════════════════════════════════════════════
-# TRIGGER: When task issues change, this workflow keeps a single-item queue
-#          and assigns the next eligible issue to GitHub Copilot cloud agent.
-#
-# PIPELINE POSITION:  Issue (queued) → [THIS WORKFLOW] → Copilot creates PR
-#
-# PREREQUISITES:
-#   • Repository secret COPILOT_PAT must be set to a Personal Access Token
-#     (fine-grained or classic) from a user who has Copilot cloud agent access.
-#     Fine-grained PAT permissions: metadata:read, actions:rw, contents:rw,
-#     issues:rw, pull-requests:rw.  Classic PAT scope: repo.
-#     See docs/setup-copilot-pat.md for step-by-step instructions.
-# ═══════════════════════════════════════════════════════════════════════════
-
 on:
   issues:
     types: [opened, reopened, labeled, unlabeled, closed]
@@ -34,8 +20,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── Step 1: Manage the queue with the default GITHUB_TOKEN ──────────
-      - name: Queue tasks and assign the next issue to Copilot
+      - name: Queue tasks and find next issue
         uses: actions/github-script@v7
         id: queue
         with:
@@ -46,168 +31,65 @@ jobs:
             const repo = context.repo.repo;
             const copilotAssigneeLogins = ['copilot-swe-agent[bot]'];
             const copilotBranchPrefixes = ['feature/task-', 'copilot/'];
-            const statusMarker = '<!-- agent-queue-status -->';
-            const linkedIssuePattern = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/i;
-
-            const repositoryInfo = context.payload.repository
-              ? { default_branch: context.payload.repository.default_branch }
-              : (await github.rest.repos.get({ owner, repo })).data;
-            const defaultBranch = repositoryInfo.default_branch;
 
             const hasLabel = (issue, name) => issue.labels.some(label => label.name === name);
             const isTaskIssue = (issue) => !issue.pull_request && hasLabel(issue, 'agent-task');
 
-            async function upsertStatusComment(issueNumber, body) {
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner,
-                repo,
-                issue_number: issueNumber,
-                per_page: 100,
-              });
-
-              const existing = comments.find(comment =>
-                comment.user?.login === 'github-actions[bot]' &&
-                comment.body?.includes(statusMarker),
-              );
-
-              if (existing) {
-                await github.rest.issues.updateComment({
-                  owner,
-                  repo,
-                  comment_id: existing.id,
-                  body,
-                });
-                return;
-              }
-
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: issueNumber,
-                body,
-              });
-            }
-
             async function setStatusLabels(issueNumber, makeActive) {
               const add = makeActive ? 'agent-in-progress' : 'agent-queued';
               const remove = makeActive ? 'agent-queued' : 'agent-in-progress';
-
-              await github.rest.issues.addLabels({
-                owner,
-                repo,
-                issue_number: issueNumber,
-                labels: [add],
-              }).catch(error => {
-                console.log(`Could not add label "${add}" to issue #${issueNumber}: ${error.message}`);
-              });
-
-              await github.rest.issues.removeLabel({
-                owner,
-                repo,
-                issue_number: issueNumber,
-                name: remove,
-              }).catch(error => {
-                console.log(`Could not remove label "${remove}" from issue #${issueNumber}: ${error.message}`);
-              });
+              await github.rest.issues.addLabels({ owner, repo, issue_number: issueNumber, labels: [add] }).catch(() => {});
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: remove }).catch(() => {});
             }
 
-            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
-              owner,
-              repo,
-              state: 'open',
-              per_page: 100,
-            });
-
-            const taskIssues = openIssues
-              .filter(isTaskIssue)
-              .sort((a, b) => a.number - b.number);
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
+            const taskIssues = openIssues.filter(isTaskIssue).sort((a, b) => a.number - b.number);
 
             if (taskIssues.length === 0) {
-              console.log('No open agent-task issues found.');
               return JSON.stringify({ action: 'none' });
             }
 
-            const openPullRequests = await github.paginate(github.rest.pulls.list, {
-              owner,
-              repo,
-              state: 'open',
-              per_page: 100,
-            });
-
-            const activePullRequest = openPullRequests.find(pr =>
-              copilotBranchPrefixes.some(prefix => pr.head.ref.startsWith(prefix)),
-            );
+            const openPRs = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
+            const activePR = openPRs.find(pr => copilotBranchPrefixes.some(prefix => pr.head.ref.startsWith(prefix)));
 
             const assignedIssue = taskIssues.find(issue =>
-              issue.assignees?.some(assignee =>
-                copilotAssigneeLogins.includes(assignee.login),
-              ),
+              issue.assignees?.some(a => copilotAssigneeLogins.includes(a.login))
             );
 
             let activeIssueNumber = assignedIssue?.number ?? null;
 
-            if (!activeIssueNumber && activePullRequest) {
-              const match = (activePullRequest.body || '').match(linkedIssuePattern);
-              if (match) {
-                activeIssueNumber = parseInt(match[1], 10);
-              }
+            if (!activeIssueNumber && activePR) {
+              const match = (activePR.body || '').match(/(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/i);
+              if (match) activeIssueNumber = parseInt(match[1], 10);
             }
 
-            if (activePullRequest && !activeIssueNumber) {
-              console.log(`Active Copilot PR #${activePullRequest.number} detected without linked issue; leaving queue unchanged.`);
-              for (const issue of taskIssues) {
-                await setStatusLabels(issue.number, false);
-              }
+            if (activePR && !activeIssueNumber) {
+              for (const issue of taskIssues) await setStatusLabels(issue.number, false);
               return JSON.stringify({ action: 'none' });
             }
 
             if (activeIssueNumber) {
-              for (const issue of taskIssues) {
-                await setStatusLabels(issue.number, issue.number === activeIssueNumber);
-              }
-
-              await upsertStatusComment(
-                activeIssueNumber,
-                [
-                  statusMarker,
-                  `## 🤖 Copilot 已开始处理`,
-                  ``,
-                  activePullRequest
-                    ? `- 当前 PR: [#${activePullRequest.number}](${activePullRequest.html_url})`
-                    : `- 当前状态: 已分配给 Copilot，等待生成 PR`,
-                  `- 当前标签: \`agent-in-progress\``,
-                  `- 可见标识: Issue 右侧 Assignees 中会显示 **Copilot**，稍后会出现 👀 / PR / Session`,
-                  ``,
-                  `*This comment is maintained automatically by Workflow 01.*`,
-                ].join('\n'),
-              );
-
-              console.log(`Queue already active on issue #${activeIssueNumber}.`);
+              for (const issue of taskIssues) await setStatusLabels(issue.number, issue.number === activeIssueNumber);
               return JSON.stringify({ action: 'none' });
             }
 
-            // ── Determine the next issue to assign ──
             const nextIssue = taskIssues[0];
+            for (const issue of taskIssues) await setStatusLabels(issue.number, issue.number === nextIssue.number);
 
-            for (const issue of taskIssues) {
-              await setStatusLabels(issue.number, issue.number === nextIssue.number);
-            }
+            const repositoryInfo = context.payload.repository
+              ? { default_branch: context.payload.repository.default_branch }
+              : (await github.rest.repos.get({ owner, repo })).data;
 
-            // Return data for the assignment step (which uses a different token)
             return JSON.stringify({
               action: 'assign',
               issueNumber: nextIssue.number,
-              defaultBranch,
+              defaultBranch: repositoryInfo.default_branch,
             });
 
-      # ── Step 2: Assign Copilot using a user PAT (required by GitHub) ────
       - name: Assign Copilot to the next issue
         if: fromJSON(steps.queue.outputs.result).action == 'assign'
         uses: actions/github-script@v7
         with:
-          # COPILOT_PAT is a Personal Access Token from a user with Copilot access.
-          # GITHUB_TOKEN *cannot* assign Copilot — GitHub requires a user token.
-          # See: https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/create-a-pr#assigning-an-issue-to-copilot-via-the-github-api
           github-token: ${{ secrets.COPILOT_PAT }}
           script: |
             const owner = context.repo.owner;
@@ -215,36 +97,11 @@ jobs:
             const queueResult = ${{ steps.queue.outputs.result }};
             const issueNumber = queueResult.issueNumber;
             const defaultBranch = queueResult.defaultBranch;
-            const statusMarker = '<!-- agent-queue-status -->';
-
-            // Helper: upsert the status comment (uses the PAT token from this step)
-            async function upsertStatusComment(issueNumber, body) {
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner, repo,
-                issue_number: issueNumber,
-                per_page: 100,
-              });
-              const existing = comments.find(c =>
-                c.body?.includes(statusMarker),
-              );
-              if (existing) {
-                await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-              } else {
-                await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body });
-              }
-            }
 
             try {
-              // Use the REST API to assign Copilot — requires a user token (PAT).
-              // Docs: https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/create-a-pr#using-the-rest-api
               await github.request('POST /repos/{owner}/{repo}/issues/{issue_number}/assignees', {
-                owner,
-                repo,
-                issue_number: issueNumber,
-                headers: {
-                  accept: 'application/vnd.github+json',
-                  'x-github-api-version': '2022-11-28',
-                },
+                owner, repo, issue_number: issueNumber,
+                headers: { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
                 assignees: ['copilot-swe-agent[bot]'],
                 agent_assignment: {
                   target_repo: `${owner}/${repo}`,
@@ -252,64 +109,13 @@ jobs:
                   custom_instructions: [
                     'Use the issue body and .github/copilot-instructions.md as the primary requirements.',
                     'Open a pull request that includes "Closes #' + issueNumber + '" in the description.',
-                    'Run the repository tests and checks that already exist before finishing.',
                   ].join('. '),
                 },
               });
-
-              await upsertStatusComment(
-                issueNumber,
-                [
-                  statusMarker,
-                  `## 🤖 已自动分配给 Copilot`,
-                  ``,
-                  `- 当前标签: \`agent-in-progress\``,
-                  `- 当前 Assignee: **Copilot**`,
-                  `- 下一步: 刷新页面后，Issue 时间线里应出现 👀 反应，随后会创建 Draft PR`,
-                  ``,
-                  `*This comment is maintained automatically by Workflow 01.*`,
-                ].join('\n'),
-              );
-
-              console.log(`✅ Assigned issue #${issueNumber} to Copilot.`);
+              console.log(`Assigned issue #${issueNumber} to Copilot.`);
             } catch (error) {
-              // Remove in-progress label on failure
-              await github.rest.issues.removeLabel({
-                owner, repo,
-                issue_number: issueNumber,
-                name: 'agent-in-progress',
-              }).catch(() => {});
-              await github.rest.issues.addLabels({
-                owner, repo,
-                issue_number: issueNumber,
-                labels: ['agent-queued'],
-              }).catch(() => {});
-
-              const isMissingPat = process.env.COPILOT_PAT_SET !== 'true';
-              const hint = isMissingPat
-                ? '请按照 `docs/setup-copilot-pat.md` 创建 Fine-grained PAT 并存为仓库 Secret `COPILOT_PAT`。'
-                : '请检查 `COPILOT_PAT` 是否过期、权限是否正确（metadata:read, actions:rw, contents:rw, issues:rw, pull-requests:rw）。';
-
-              await upsertStatusComment(
-                issueNumber,
-                [
-                  statusMarker,
-                  `## ⚠️ 自动分配 Copilot 失败`,
-                  ``,
-                  `Workflow 01 已尝试通过 GitHub API 自动把本 Issue 分配给 Copilot，但失败了。`,
-                  `你仍然可以在 Issue 右侧点击 **Assign to Agent** → **Copilot** 手动触发。`,
-                  ``,
-                  `**错误信息**: \`${error.message}\``,
-                  ``,
-                  `**提示**: ${hint}`,
-                  ``,
-                  `> GitHub 要求使用 **用户个人令牌 (PAT)** 来分配 Copilot，Actions 内置的 GITHUB_TOKEN 不具备此权限。`,
-                  `> 详见: [GitHub 官方文档](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/create-a-pr#assigning-an-issue-to-copilot-via-the-github-api)`,
-                  ``,
-                  `*This comment is maintained automatically by Workflow 01.*`,
-                ].join('\n'),
-              );
-
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: 'agent-in-progress' }).catch(() => {});
+              await github.rest.issues.addLabels({ owner, repo, issue_number: issueNumber, labels: ['agent-queued'] }).catch(() => {});
               throw error;
             }
         env:

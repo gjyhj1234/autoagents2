@@ -1,30 +1,10 @@
 name: 🔀 03 — Auto Merge
 
-# ═══════════════════════════════════════════════════════════════════════════
-# TRIGGER: After all PR checks pass (status checks complete), if the PR is
-#          from a Copilot branch, this workflow converts it from draft to
-#          ready-for-review (if needed), merges it, closes the linked issue,
-#          and triggers Workflow 01 to pick up the next task.
-#
-# PIPELINE POSITION:  Tests pass → [THIS WORKFLOW] → PR merged → next issue
-#
-# PREREQUISITES:
-#   • Repository setting: Allow auto-merge = ON
-#   • The "auto-merge" label must exist in the repository
-#   • COPILOT_PAT secret must be set (same as Workflow 01) so that
-#     the merge event can trigger follow-up workflows.
-# ═══════════════════════════════════════════════════════════════════════════
-
 on:
-  # Fires when a PR's check suite finishes
   check_suite:
     types: [completed]
-
-  # Also fires when a review is submitted (in case review is required)
   pull_request_review:
     types: [submitted]
-
-  # Manual trigger for testing
   workflow_dispatch:
     inputs:
       pr_number:
@@ -40,9 +20,6 @@ permissions:
   actions: write
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────────
-  # JOB 1: Evaluate and merge PRs that have passed all checks
-  # ─────────────────────────────────────────────────────────────────────────
   auto-merge:
     name: Evaluate PRs for Auto-Merge
     runs-on: ubuntu-latest
@@ -54,108 +31,68 @@ jobs:
       - name: Find and merge eligible PRs
         uses: actions/github-script@v7
         with:
-          # Use COPILOT_PAT so that the merge push triggers other workflows.
-          # Fall back to GITHUB_TOKEN if COPILOT_PAT is not set (merge will
-          # work, but follow-up workflows won't be triggered automatically).
           github-token: ${{ secrets.COPILOT_PAT || secrets.GITHUB_TOKEN }}
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const copilotBranchPrefixes = ['feature/task-', 'copilot/'];
 
-            // If manually triggered, only process that PR
             const manualPr = context.payload.inputs?.pr_number
               ? parseInt(context.payload.inputs.pr_number)
               : null;
 
-            // Get open PRs (or just the one triggered manually)
             let prs;
             if (manualPr) {
-              const { data } = await github.rest.pulls.get({
-                owner, repo,
-                pull_number: manualPr,
-              });
+              const { data } = await github.rest.pulls.get({ owner, repo, pull_number: manualPr });
               prs = [data];
             } else {
-              const { data } = await github.rest.pulls.list({
-                owner, repo,
-                state: 'open',
-                per_page: 50,
-              });
+              const { data } = await github.rest.pulls.list({ owner, repo, state: 'open', per_page: 50 });
               prs = data;
             }
 
             for (const pr of prs) {
               console.log(`\nEvaluating PR #${pr.number}: ${pr.title}`);
 
-              // Check if PR has "auto-merge" label OR is from a Copilot branch
               const hasAutoMergeLabel = pr.labels.some(l => l.name === 'auto-merge');
               const isCopilotBranch = copilotBranchPrefixes.some(p => pr.head.ref.startsWith(p));
 
               if (!hasAutoMergeLabel && !isCopilotBranch) {
-                console.log(`  ⏭️  Skipping — no "auto-merge" label and not a Copilot branch`);
+                console.log(`  Skipping — no auto-merge label and not a Copilot branch`);
                 continue;
               }
 
-              // If it's a Copilot branch but missing the label, add it now
               if (!hasAutoMergeLabel && isCopilotBranch) {
                 await github.rest.issues.addLabels({
-                  owner, repo,
-                  issue_number: pr.number,
-                  labels: ['auto-merge'],
-                }).catch(e => console.log(`  ⚠️  Could not add auto-merge label: ${e.message}`));
+                  owner, repo, issue_number: pr.number, labels: ['auto-merge'],
+                }).catch(e => console.log(`  Could not add auto-merge label: ${e.message}`));
               }
 
-              // ── Convert Draft PRs to Ready-for-Review ──────────────
-              // Copilot cloud agent creates draft PRs by default.
-              // GitHub does not allow merging draft PRs, so we must
-              // mark them as ready-for-review first using GraphQL.
               if (pr.draft) {
-                console.log(`  📝 PR is a draft — converting to ready-for-review...`);
                 try {
-                  // Get the GraphQL node_id for this PR
-                  const prNodeId = pr.node_id;
                   await github.graphql(`
                     mutation($prId: ID!) {
                       markPullRequestReadyForReview(input: { pullRequestId: $prId }) {
-                        pullRequest {
-                          isDraft
-                        }
+                        pullRequest { isDraft }
                       }
                     }
-                  `, { prId: prNodeId });
-                  console.log(`  ✅ PR #${pr.number} marked as ready-for-review`);
+                  `, { prId: pr.node_id });
                 } catch (e) {
-                  console.log(`  ❌ Could not convert draft PR: ${e.message}`);
+                  console.log(`  Could not convert draft PR: ${e.message}`);
                   continue;
                 }
               }
 
-              // Re-fetch PR to get updated mergeable status after draft conversion
-              const { data: freshPr } = await github.rest.pulls.get({
-                owner, repo,
-                pull_number: pr.number,
-              });
+              const { data: freshPr } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
 
-              // Check merge status
               if (freshPr.mergeable === false) {
-                console.log(`  ❌ Skipping — PR has merge conflicts`);
-                await github.rest.issues.createComment({
-                  owner, repo,
-                  issue_number: pr.number,
-                  body: `## ⚠️ Auto-Merge Blocked\n\nThis PR has merge conflicts and cannot be automatically merged.\nPlease resolve the conflicts and re-push.`,
-                });
+                console.log(`  Skipping — PR has merge conflicts`);
                 continue;
               }
 
-              // Get all check runs for the HEAD commit
               const { data: checkRuns } = await github.rest.checks.listForRef({
-                owner, repo,
-                ref: pr.head.sha,
-                per_page: 100,
+                owner, repo, ref: pr.head.sha, per_page: 100,
               });
 
-              // Filter out this workflow's own check run to avoid deadlock
               const relevantChecks = checkRuns.check_runs.filter(
                 c => !c.name.includes('Auto Merge') && !c.name.includes('auto-merge')
                   && !c.name.includes('Auto-Merge') && !c.name.includes('Evaluate PRs')
@@ -167,161 +104,59 @@ jobs:
               );
 
               if (!allCompleted) {
-                console.log(`  ⏳ Skipping — checks not yet complete`);
+                console.log(`  Skipping — checks not yet complete`);
                 continue;
               }
 
               if (!allPassed) {
-                const failed = relevantChecks
-                  .filter(c => c.conclusion !== 'success' && c.conclusion !== 'skipped' && c.conclusion !== 'neutral')
-                  .map(c => `- ${c.name}: ${c.conclusion}`)
-                  .join('\n');
-                console.log(`  ❌ Skipping — some checks failed:\n${failed}`);
-                await github.rest.issues.createComment({
-                  owner, repo,
-                  issue_number: pr.number,
-                  body: [
-                    `## ❌ Auto-Merge Blocked — Tests Failed`,
-                    ``,
-                    `The following checks did not pass:`,
-                    failed,
-                    ``,
-                    `Please review the failures, push a fix, and the auto-merge will retry.`,
-                  ].join('\n'),
-                });
+                console.log(`  Skipping — some checks failed`);
                 continue;
               }
 
-              // All checks passed — merge!
-              console.log(`  ✅ All checks passed — merging PR #${pr.number}`);
+              console.log(`  All checks passed — merging PR #${pr.number}`);
 
               try {
                 await github.rest.pulls.merge({
-                  owner, repo,
-                  pull_number: pr.number,
-                  merge_method: 'squash',
+                  owner, repo, pull_number: pr.number, merge_method: 'squash',
                   commit_title: `${pr.title} (#${pr.number})`,
-                  commit_message: [
-                    pr.body || '',
-                    ``,
-                    `Auto-merged by GitHub Actions after all checks passed.`,
-                  ].join('\n'),
                 });
 
-                console.log(`  ✅ PR #${pr.number} merged successfully`);
-
-                // Extract linked issue numbers from PR body (e.g., "Closes #5")
                 const linkedIssues = [];
                 const closePatterns = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
                 let match;
-                const bodyText = pr.body || '';
-                while ((match = closePatterns.exec(bodyText)) !== null) {
+                while ((match = closePatterns.exec(pr.body || '')) !== null) {
                   linkedIssues.push(parseInt(match[1]));
                 }
 
-                // Also try to extract from PR title (e.g., "Task-01" → find issue)
                 const taskMatch = pr.title.match(/task[- ]?(\d+)/i) || pr.head.ref.match(/task[- ]?(\d+)/i);
                 if (taskMatch && linkedIssues.length === 0) {
-                  // Search for the issue by title pattern
-                  const { data: issues } = await github.rest.issues.listForRepo({
-                    owner, repo,
-                    state: 'open',
-                    per_page: 100,
-                  });
+                  const { data: issues } = await github.rest.issues.listForRepo({ owner, repo, state: 'open', per_page: 100 });
                   const taskNum = taskMatch[1].padStart(2, '0');
-                  const matchingIssue = issues.find(i =>
-                    i.title.includes(`Task-${taskNum}`) || i.title.includes(`task-${taskNum}`)
-                  );
-                  if (matchingIssue) {
-                    linkedIssues.push(matchingIssue.number);
-                    console.log(`  📌 Found linked issue #${matchingIssue.number} from task number in branch/title`);
-                  }
+                  const matchingIssue = issues.find(i => i.title.includes(`Task-${taskNum}`) || i.title.includes(`task-${taskNum}`));
+                  if (matchingIssue) linkedIssues.push(matchingIssue.number);
                 }
 
-                // Mark linked issues as completed
                 for (const issueNum of linkedIssues) {
-                  try {
-                    // Add agent-completed label
-                    await github.rest.issues.addLabels({
-                      owner, repo,
-                      issue_number: issueNum,
-                      labels: ['agent-completed'],
-                    }).catch(() => {});
-
-                    // Remove in-progress label
-                    await github.rest.issues.removeLabel({
-                      owner, repo,
-                      issue_number: issueNum,
-                      name: 'agent-in-progress',
-                    }).catch(() => {});
-
-                    // Close the issue explicitly
-                    await github.rest.issues.update({
-                      owner, repo,
-                      issue_number: issueNum,
-                      state: 'closed',
-                      state_reason: 'completed',
-                    }).catch(() => {});
-
-                    // Post completion comment on the issue
-                    await github.rest.issues.createComment({
-                      owner, repo,
-                      issue_number: issueNum,
-                      body: [
-                        `## ✅ Task Completed`,
-                        ``,
-                        `PR #${pr.number} has been automatically merged after all tests passed.`,
-                        ``,
-                        `**Merge commit**: ${pr.merge_commit_sha || 'N/A'}`,
-                        `**Merged by**: GitHub Actions (auto-merge pipeline)`,
-                        ``,
-                        `---`,
-                        `*Pipeline: Issue → Agent → PR → Tests → [Merged]*`,
-                        `*The next issue labeled \`agent-task\` will be picked up automatically.*`,
-                      ].join('\n'),
-                    });
-
-                    console.log(`  📌 Updated issue #${issueNum} as completed`);
-                  } catch (e) {
-                    console.log(`  ⚠️  Could not update issue #${issueNum}: ${e.message}`);
-                  }
+                  await github.rest.issues.addLabels({ owner, repo, issue_number: issueNum, labels: ['agent-completed'] }).catch(() => {});
+                  await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNum, name: 'agent-in-progress' }).catch(() => {});
+                  await github.rest.issues.update({ owner, repo, issue_number: issueNum, state: 'closed', state_reason: 'completed' }).catch(() => {});
                 }
 
-                // Delete the feature branch after merge
                 try {
-                  await github.rest.git.deleteRef({
-                    owner, repo,
-                    ref: `heads/${pr.head.ref}`,
-                  });
-                  console.log(`  🗑️  Deleted branch: ${pr.head.ref}`);
+                  await github.rest.git.deleteRef({ owner, repo, ref: `heads/${pr.head.ref}` });
                 } catch (e) {
-                  console.log(`  ⚠️  Could not delete branch: ${e.message}`);
+                  console.log(`  Could not delete branch: ${e.message}`);
                 }
 
-                // ── Trigger Workflow 01 to pick up the next issue ──────
-                // GITHUB_TOKEN events don't trigger other workflows, but
-                // workflow_dispatch is the documented exception. We also
-                // use COPILOT_PAT which ensures events ARE propagated.
                 try {
                   await github.rest.actions.createWorkflowDispatch({
-                    owner, repo,
-                    workflow_id: '01-issue-agent.yml',
-                    ref: 'main',
+                    owner, repo, workflow_id: '01-issue-agent.yml', ref: 'main',
                   });
-                  console.log(`  🔄 Triggered Workflow 01 to pick up next issue`);
                 } catch (e) {
-                  console.log(`  ⚠️  Could not trigger Workflow 01: ${e.message}`);
-                  console.log(`     The next issue event (open/label) will trigger it.`);
+                  console.log(`  Could not trigger Workflow 01: ${e.message}`);
                 }
 
               } catch (e) {
-                console.log(`  ❌ Merge failed: ${e.message}`);
-                await github.rest.issues.createComment({
-                  owner, repo,
-                  issue_number: pr.number,
-                  body: `## ❌ Auto-Merge Failed\n\nError: ${e.message}\n\nPlease merge manually or re-trigger this workflow.`,
-                });
+                console.log(`  Merge failed: ${e.message}`);
               }
             }
-
-            console.log('\n✅ Auto-merge evaluation complete');
