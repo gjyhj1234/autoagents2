@@ -7,6 +7,7 @@ on:
 permissions:
   pull-requests: write
   issues: write
+  actions: write
 
 jobs:
   label-for-auto-merge:
@@ -27,3 +28,42 @@ jobs:
               issue_number: pr.number,
               labels: ['auto-merge'],
             }).catch(e => console.log(`Could not add auto-merge label: ${e.message}`));
+
+      # ⚠️ 安全警告：自动批准所有匹配分支的 Workflow Run。
+      # 任何提交到 feature/task-* 或 copilot/* 分支的代码都会被自动批准执行。
+      # 仅在私有仓库或完全信任所有贡献者时使用。
+      - name: Auto-approve pending workflow runs
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.COPILOT_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const headSha = context.payload.pull_request.head.sha;
+
+            // List all workflow runs for this head SHA that require approval
+            const { data: runsData } = await github.rest.actions.listWorkflowRunsForRepo({
+              owner,
+              repo,
+              head_sha: headSha,
+              status: 'action_required',
+              per_page: 50,
+            });
+
+            if (runsData.total_count === 0) {
+              console.log('No pending workflow runs requiring approval.');
+            }
+
+            for (const run of runsData.workflow_runs) {
+              console.log(`Approving workflow run #${run.id} (${run.name}) for SHA ${headSha}`);
+              try {
+                await github.rest.actions.approveWorkflowRun({
+                  owner,
+                  repo,
+                  run_id: run.id,
+                });
+                console.log(`  Approved run #${run.id}`);
+              } catch (e) {
+                console.log(`  Could not approve run #${run.id}: ${e.message}`);
+              }
+            }
