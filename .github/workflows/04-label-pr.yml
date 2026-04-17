@@ -1,20 +1,23 @@
 name: 🏷️ 04 — Label Copilot PRs
 
 # ────────────────────────────────────────────────────────────────
-# Uses pull_request_target so this workflow runs in the context of
-# the BASE branch (main). This means it does NOT require maintainer
-# approval for first-time / outside contributors.
+# Labels Copilot PRs with "auto-merge" and un-drafts them.
 #
-# NOTE: The GitHub REST API "Approve a workflow run for a fork pull
-# request" (POST .../actions/runs/{run_id}/approve) only works for
-# *fork* PRs.  For same-repo Copilot branches the API returns
-# "This run is not from a fork pull request".  We therefore rely on
-# pull_request_target in Workflow 02 instead of trying to approve
-# runs here.
+# Triggers:
+#   - pull_request_target: fast path (may be blocked by Copilot's
+#     built-in approval requirement — unreliable)
+#   - workflow_dispatch: reliable path, called by 00-pr-dispatcher
+#     on a schedule.  NEVER subject to contributor approval.
 # ────────────────────────────────────────────────────────────────
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to label and set up'
+        required: true
+        type: number
 
 permissions:
   pull-requests: write
@@ -24,38 +27,56 @@ jobs:
   label-and-setup:
     name: Label & set up Copilot PRs
     runs-on: ubuntu-latest
-    if: startsWith(github.event.pull_request.head.ref, 'feature/task-') || startsWith(github.event.pull_request.head.ref, 'copilot/')
+    # For pull_request_target: only run for Copilot branches
+    # For workflow_dispatch: always run (dispatcher already filters)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.pull_request.head.ref, 'feature/task-') ||
+      startsWith(github.event.pull_request.head.ref, 'copilot/')
 
     steps:
-      - name: Add auto-merge label
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const pr = context.payload.pull_request;
-
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr.number,
-              labels: ['auto-merge'],
-            }).catch(e => console.log(`Could not add auto-merge label: ${e.message}`));
-
-      - name: Mark PR ready for review (un-draft)
-        if: github.event.pull_request.draft == true
+      - name: Add auto-merge label and un-draft PR
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.COPILOT_PAT }}
           script: |
-            const pr = context.payload.pull_request;
-            try {
-              await github.graphql(`
-                mutation($prId: ID!) {
-                  markPullRequestReadyForReview(input: { pullRequestId: $prId }) {
-                    pullRequest { isDraft }
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Resolve the PR — either from event payload or from workflow_dispatch input
+            let pr;
+            if (context.eventName === 'workflow_dispatch') {
+              const prNumber = parseInt(context.payload.inputs.pr_number);
+              const { data } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              pr = data;
+            } else {
+              pr = context.payload.pull_request;
+            }
+
+            console.log(`Processing PR #${pr.number}: ${pr.title}`);
+
+            // Add auto-merge label
+            await github.rest.issues.addLabels({
+              owner, repo,
+              issue_number: pr.number,
+              labels: ['auto-merge'],
+            }).catch(e => console.log(`Could not add auto-merge label: ${e.message}`));
+            console.log(`Added auto-merge label to PR #${pr.number}`);
+
+            // Un-draft if needed
+            if (pr.draft) {
+              try {
+                await github.graphql(`
+                  mutation($prId: ID!) {
+                    markPullRequestReadyForReview(input: { pullRequestId: $prId }) {
+                      pullRequest { isDraft }
+                    }
                   }
-                }
-              `, { prId: pr.node_id });
-              console.log(`Marked PR #${pr.number} as ready for review`);
-            } catch (e) {
-              console.log(`Could not un-draft PR: ${e.message}`);
+                `, { prId: pr.node_id });
+                console.log(`Marked PR #${pr.number} as ready for review`);
+              } catch (e) {
+                console.log(`Could not un-draft PR: ${e.message}`);
+              }
+            } else {
+              console.log(`PR #${pr.number} is not a draft — no un-draft needed`);
             }

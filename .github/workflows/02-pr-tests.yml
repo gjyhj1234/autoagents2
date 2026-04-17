@@ -1,24 +1,24 @@
 name: 🧪 02 — PR Tests
 
 # ────────────────────────────────────────────────────────────────
-# Uses pull_request_target so this workflow runs in the context of
-# the BASE branch (main).  This avoids the "awaiting maintainer
-# approval" gate that blocks pull_request-triggered workflows when
-# the PR author is a first-time or outside contributor (e.g.
-# copilot-swe-agent[bot]).
+# Runs CI tests for Copilot PRs.
 #
-# ⚠️ SECURITY NOTE: The checkout step uses the PR head SHA, so we
-# build and test UNTRUSTED code with elevated privileges.  Only
-# acceptable in private / fully-trusted repositories.
-#
-# NOTE: The approveWorkflowRun REST API only works for *fork* pull
-# requests.  For same-repo Copilot PRs the only reliable fix is to
-# use pull_request_target.
+# Triggers:
+#   - pull_request_target: fast path (may be blocked by Copilot's
+#     built-in approval requirement — unreliable)
+#   - workflow_dispatch: reliable path, called by 00-pr-dispatcher
+#     on a schedule.  NEVER subject to contributor approval.
+#     Accepts a pr_number input to identify which PR to test.
 # ────────────────────────────────────────────────────────────────
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to test'
+        required: true
+        type: number
 
 permissions:
   contents: read
@@ -32,14 +32,46 @@ env:
   NODE_VERSION: '22'
 
 jobs:
+  # ── Resolve PR info for workflow_dispatch triggers ──
+  resolve-pr:
+    name: 🔍 Resolve PR info
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      pr_head_sha: ${{ steps.resolve.outputs.pr_head_sha }}
+    steps:
+      - name: Resolve PR number and head SHA
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            let prNumber, headSha;
+
+            if (context.eventName === 'workflow_dispatch') {
+              prNumber = parseInt(context.payload.inputs.pr_number);
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              headSha = pr.head.sha;
+            } else {
+              // pull_request_target
+              prNumber = context.payload.pull_request.number;
+              headSha = context.payload.pull_request.head.sha;
+            }
+
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('pr_head_sha', headSha);
+            console.log(`PR #${prNumber}, head SHA: ${headSha}`);
+
   test-backend:
     name: 🔷 Backend Tests (.NET 10)
     runs-on: ubuntu-latest
+    needs: [resolve-pr]
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ needs.resolve-pr.outputs.pr_head_sha }}
 
       - name: Check if backend exists
         id: check-backend
@@ -76,11 +108,12 @@ jobs:
   test-frontend:
     name: 🟢 Frontend Tests (Vue/Vitest)
     runs-on: ubuntu-latest
+    needs: [resolve-pr]
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ needs.resolve-pr.outputs.pr_head_sha }}
 
       - name: Check if frontend exists
         id: check-frontend
@@ -120,8 +153,8 @@ jobs:
   pr-summary:
     name: 📋 Post Test Summary
     runs-on: ubuntu-latest
-    needs: [test-backend, test-frontend]
-    if: always() && github.event.pull_request
+    needs: [resolve-pr, test-backend, test-frontend]
+    if: always()
 
     steps:
       - name: Post summary comment
@@ -155,7 +188,7 @@ jobs:
                 : `### ❌ One or more checks failed`,
             ].join('\n');
 
-            const prNumber = context.payload.pull_request.number;
+            const prNumber = parseInt('${{ needs.resolve-pr.outputs.pr_number }}');
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
@@ -184,9 +217,9 @@ jobs:
               });
             }
 
-      # Because pull_request_target check runs are NOT associated with the
-      # PR head SHA, we create an explicit commit status so that Workflow 03
-      # (Auto-Merge) can verify tests passed via getCombinedStatusForRef().
+      # Create an explicit commit status on the PR head SHA so that
+      # Workflow 03 (Auto-Merge) can verify tests passed via
+      # getCombinedStatusForRef().
       - name: Set commit status on PR head
         if: always()
         uses: actions/github-script@v7
@@ -199,7 +232,7 @@ jobs:
             const allPassed = Object.values(jobs).every(
               r => r === 'success' || r === 'skipped'
             );
-            const prHeadSha = context.payload.pull_request.head.sha;
+            const prHeadSha = '${{ needs.resolve-pr.outputs.pr_head_sha }}';
 
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
@@ -222,6 +255,7 @@ jobs:
         with:
           github-token: ${{ secrets.COPILOT_PAT }}
           script: |
+            const prNumber = '${{ needs.resolve-pr.outputs.pr_number }}';
             try {
               await github.rest.actions.createWorkflowDispatch({
                 owner: context.repo.owner,
@@ -229,10 +263,10 @@ jobs:
                 workflow_id: '03-auto-merge.yml',
                 ref: 'main',
                 inputs: {
-                  pr_number: String(context.payload.pull_request.number),
+                  pr_number: prNumber,
                 },
               });
-              console.log('Triggered auto-merge evaluation for PR #' + context.payload.pull_request.number);
+              console.log('Triggered auto-merge evaluation for PR #' + prNumber);
             } catch (e) {
               console.log(`Could not trigger auto-merge: ${e.message}`);
             }

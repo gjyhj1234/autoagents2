@@ -11,8 +11,8 @@
 1. [问题背景](#1-问题背景)
 2. [根因分析](#2-根因分析)
 3. [已尝试但不充分的方案](#3-已尝试但不充分的方案)
-4. [推荐解决方案：修改 Actions 审批设置（最宽松选项）](#4-推荐解决方案修改-actions-审批设置最宽松选项)
-5. [补充方案：通过 GitHub API 将 Bot 添加为仓库协作者](#5-补充方案通过-github-api-将-bot-添加为仓库协作者)
+4. [最终解决方案：workflow_dispatch + schedule 调度器](#4-最终解决方案workflow_dispatch--schedule-调度器)
+5. [新架构详解](#5-新架构详解)
 6. [方案生效验证步骤](#6-方案生效验证步骤)
 7. [FAQ / 常见问题](#7-faq--常见问题)
 
@@ -33,42 +33,35 @@
 - 自动合并无法触发（工作流 03 依赖 02 的结果）
 - **整条流水线停滞，无法实现无人值守**
 
-### 相关 PR 和工作流运行记录
-
-| 工作流 | 触发事件 | 结论 | 说明 |
-|--------|----------|------|------|
-| 🧪 02 — PR Tests | `pull_request_target` | ❌ `action_required` | 有时成功，有时被阻止 |
-| 🏷️ 04 — Label Copilot PRs | `pull_request_target` | ❌ `action_required` | 始终被阻止 |
-| 🔓 05 — Auto Approve | `workflow_run` | ❌ `action_required` | 始终被阻止 |
-| 🔀 03 — Auto Merge | `workflow_dispatch` | ✅ `success` | 由 COPILOT_PAT 触发，不受影响 |
-
 ---
 
 ## 2. 根因分析
 
-### GitHub 的安全策略
+### 两层安全机制
 
-GitHub Actions 对**公开仓库**有一个安全策略：
+经过深入研究，发现审批阻塞由**两个独立的安全机制**导致：
 
-> **来自外部贡献者的 PR** 触发的工作流需要仓库维护者审批后才能运行。
+#### 机制 1: 仓库级 Actions 审批设置
 
-这个策略的设置位于：**Settings → Actions → General → "Approval for running fork pull request workflows from contributors"**
+GitHub Actions 对公开仓库有安全策略：来自外部贡献者的 PR 触发的工作流需要仓库维护者审批。
+- 位置: Settings → Actions → General → "Approval for running fork pull request workflows from contributors"
+- `copilot-swe-agent[bot]` 被视为外部贡献者
 
-### 为什么 `copilot-swe-agent[bot]` 被视为"外部贡献者"
+#### 机制 2: Copilot 平台级内建安全机制 ⚠️
 
-`copilot-swe-agent[bot]` 是 GitHub 平台管理的 App Bot 账户，它：
+根据 [GitHub 官方文档](https://docs.github.com/en/copilot/responsible-use/copilot-cloud-agent#avoiding-privileged-escalation)：
 
-- **不是**仓库的 Owner 或 Collaborator
-- **不是**组织的 Member
-- 因此被 GitHub 归类为"external contributor"（外部贡献者）
+> **"GitHub Actions workflows triggered in response to pull requests raised by Copilot cloud agent require approval from a user with repository write access before they will run."**
 
-### 关于 `pull_request_target` 的矛盾
+**这是 Copilot 云代理自身的平台级安全特性**，与仓库设置无关，无法通过任何仓库配置禁用。
 
-根据 [GitHub 最新官方文档](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#controlling-changes-from-forks-to-workflows-in-public-repositories)：
+### 为什么 `pull_request_target` 不可靠
 
-> Workflows triggered by `pull_request_target` events are run in the context of the base branch. Since the base branch is considered trusted, **workflows triggered by these events will always run, regardless of approval settings**.
+GitHub 文档声称 `pull_request_target` "always run, regardless of approval settings"，但这仅指**仓库级**审批设置。Copilot 的**平台级**安全机制会覆盖此行为，导致结果不一致。
 
-理论上，使用 `pull_request_target` 触发器应该绕过所有审批要求。**但实际测试中，这个绕过并不稳定**——有时有效，有时仍被阻止。这可能与 GitHub 平台对 Bot 账户的特殊处理有关。
+### 为什么添加 Bot 为协作者不可行
+
+GitHub REST API `PUT /repos/{owner}/{repo}/collaborators/{username}` 只接受 `type: "User"` 的账户。`copilot-swe-agent[bot]` 的类型是 `Bot`，API 返回 HTTP 422 错误。GitHub Apps 通过 Installation 机制工作，不能通过协作者 API 添加。
 
 ---
 
@@ -76,226 +69,105 @@ GitHub Actions 对**公开仓库**有一个安全策略：
 
 | 方案 | 结果 | 原因 |
 |------|------|------|
-| 方案 A: 选择 "Require approval for first-time contributors who are new to GitHub" | ❌ 不生效 | Bot 账户可能不适用此分类 |
-| 方案 B: 手动批准一次后自动化 | ❌ 不持久 | 每次新 PR 仍然需要审批 |
-| 使用 `pull_request_target` | ⚠️ 不稳定 | 文档称应绕过，但实际对 Bot 不一致 |
-| API `approveWorkflowRun` | ❌ 无效 | 仅对 fork PR 有效 |
+| 修改 Actions 审批设置为最宽松 | ❌ 不充分 | 控制的是仓库级策略，不控制 Copilot 平台级安全机制 |
+| 使用 `pull_request_target` | ⚠️ 不稳定 | 被 Copilot 平台级安全层覆盖 |
+| 添加 Bot 为协作者 (API) | ❌ 不可行 | API 只接受 User 类型，Bot 类型返回 422 |
+| `approveWorkflowRun` API | ❌ 无效 | 仅对 fork PR 有效 |
+| 手动批准后自动化 | ❌ 不持久 | Bot 的首次贡献状态不会更新 |
 
 ---
 
-## 4. 推荐解决方案：修改 Actions 审批设置（最宽松选项）
+## 4. 最终解决方案：workflow_dispatch + schedule 调度器
 
-> ⚠️ **重要提示**: 修改设置后，需要**重新触发**工作流。旧的 `action_required` 状态的工作流运行**不会**自动变为已批准。
+### 核心原理
 
-### 步骤 1: 打开仓库 Settings 页面
+`workflow_dispatch` 和 `schedule` 触发器完全运行在仓库自身的上下文中，**不受任何贡献者审批策略的影响**——无论是仓库级设置还是 Copilot 平台级安全机制。
 
-1. 在浏览器中打开你的仓库主页：
-   ```
-   https://github.com/gjyhj1234/autoagents2
-   ```
+### 架构设计
 
-2. 点击页面顶部的 **Settings**（设置）标签页
-   - 如果看不到 "Settings" 标签，点击 `...` 按钮展开更多选项，然后点击 **Settings**
-   - ⚠️ 你必须是仓库 Owner 或有 Admin 权限才能看到 Settings
+```
+Copilot 创建 PR
+  ↓ (pull_request_target 可能触发也可能被阻止 — 快速路径)
+  ↓
+[00] PR Dispatcher (schedule: 每 5 分钟) — 可靠路径
+  → 检测未处理的 Copilot PR
+  → workflow_dispatch → [04] Label PR (标签 + 取消 Draft)
+  → workflow_dispatch → [02] PR Tests (运行测试)
+    → [02] 设置 commit status (ci/pr-tests)
+    → [02] workflow_dispatch → [03] Auto Merge (自动合并)
+      → [03] 关闭 Issue + 删除分支
+      → [03] workflow_dispatch → [01] 处理下一个 Issue
+```
 
-### 步骤 2: 进入 Actions 设置
+### 双路径设计
 
-1. 在左侧边栏中，找到并点击 **Actions**
-2. 在展开的子菜单中，点击 **General**
-
-### 步骤 3: 修改审批策略
-
-1. 向下滚动页面，找到标题为 **"Approval for running fork pull request workflows from contributors"** 的区域
-
-2. 选择 **最宽松的选项**：
-   > **"Require approval for first-time contributors who are new to GitHub"**
-   >
-   > 含义: 仅在贡献者**同时满足以下两个条件**时才需审批：
-   > - 是 GitHub 新用户
-   > - 从未在此仓库有过合并的 commit 或 PR
-
-3. 点击页面底部的 **Save** 按钮保存设置
-
-### 步骤 4: 重新触发工作流
-
-**重要**：设置变更后，之前已经卡在 `action_required` 的工作流运行**不会自动生效**。你需要：
-
-#### 方法 A: 手动批准现有运行（快速见效）
-
-1. 打开仓库的 Actions 页面：
-   ```
-   https://github.com/gjyhj1234/autoagents2/actions
-   ```
-
-2. 找到状态为 **"Waiting for approval"** 或 **"Action required"** 的工作流运行
-
-3. 点击进入该运行的详情页
-
-4. 在页面右上角或顶部，找到并点击 **"Approve and run"** 按钮
-
-5. 工作流将开始执行
-
-#### 方法 B: 关闭并重新创建 PR（确保新设置生效）
-
-如果批准按钮不起作用或不存在：
-
-1. 进入 PR 页面（例如 PR #36）
-2. 滚动到底部，点击 **"Close pull request"**
-3. 让 Copilot 重新创建 PR（或手动 reopen）
-4. 新创建的 PR 将使用新的审批设置
+保留了 `pull_request_target` 作为"快速路径"：如果 GitHub 碰巧让它通过了，PR 会在几秒内被处理。如果被阻止，定时调度器会在最多 5 分钟内接管。
 
 ---
 
-## 5. 补充方案：通过 GitHub API 将 Bot 添加为仓库协作者
+## 5. 新架构详解
 
-如果**方案 4 仍然不生效**，可以尝试将 `copilot-swe-agent[bot]` 添加为仓库协作者。这样 Bot 将不再被归类为"外部贡献者"。
+### 新增工作流: `00-pr-dispatcher.yml`
 
-### 5.1 为什么不能通过 UI 添加
+| 属性 | 值 |
+|------|------|
+| 触发方式 | `schedule` (每 5 分钟) + `workflow_dispatch` (手动) |
+| 作用 | 轮询 open 的 Copilot PR，触发下游工作流 |
+| 使用 Token | `COPILOT_PAT` |
 
-GitHub 仓库的 **Settings → Collaborators** 页面的搜索框**无法搜索到 Bot 账户**（如 `copilot-swe-agent[bot]`）。必须通过 GitHub REST API 或 `gh` CLI 工具来添加。
+逻辑：
+1. 列出所有 open 的 PR
+2. 筛选 Copilot PR（通过分支前缀或作者判断）
+3. 对每个 PR 检查：
+   - 是否缺少 `auto-merge` 标签 → 触发 04
+   - 是否缺少 `ci/pr-tests` commit status → 触发 02
 
-### 5.2 前置准备
+### 修改的工作流
 
-你需要一个拥有 `admin` 权限的 Personal Access Token (PAT)。
+| 工作流 | 改动 |
+|--------|------|
+| `02-pr-tests.yml` | 新增 `workflow_dispatch` 输入 `pr_number`；新增 `resolve-pr` job 统一两种触发方式 |
+| `04-label-pr.yml` | 新增 `workflow_dispatch` 输入 `pr_number`；合并两个 step 为一个 |
+| `05-auto-approve.yml` | 已确认仅对 fork PR 有效，保留作为安全网 |
 
-#### 创建 PAT 的步骤：
+### 完整工作流列表
 
-如果你已经有 `COPILOT_PAT`（在仓库 Secrets 中配置过的），可以直接使用它。否则，创建一个新的：
-
-1. 打开 GitHub 个人设置：
-   ```
-   https://github.com/settings/tokens
-   ```
-
-2. 点击 **"Generate new token"** → **"Generate new token (classic)"**
-
-3. 填写：
-   - **Note**: `Add bot collaborator`
-   - **Expiration**: 选择一个合适的过期时间
-   - **Scopes**: 勾选 `repo`（包含全部仓库权限）
-
-4. 点击底部的 **"Generate token"**
-
-5. **立即复制生成的 token**（离开页面后无法再次查看）
-
-### 5.3 查找 Bot 的 GitHub 用户 ID
-
-首先需要确认 `copilot-swe-agent[bot]` 的 GitHub 用户信息。
-
-在终端（Terminal / 命令提示符 / PowerShell）中运行：
-
-```bash
-curl -s https://api.github.com/users/copilot-swe-agent%5Bbot%5D | python3 -m json.tool
-```
-
-或者使用 `gh` CLI：
-
-```bash
-gh api /users/copilot-swe-agent%5Bbot%5D
-```
-
-> **说明**: `%5B` 和 `%5D` 是 `[` 和 `]` 的 URL 编码。
-
-如果命令返回了用户信息（包含 `id`、`login` 等字段），说明该 Bot 用户存在，可以继续下一步。
-
-### 5.4 通过 API 添加 Bot 为协作者
-
-使用以下命令将 Bot 添加为仓库协作者（`write` 权限）：
-
-#### 使用 curl：
-
-```bash
-curl -X PUT \
-  -H "Accept: application/vnd.github+json" \
-  -H "Authorization: Bearer YOUR_PERSONAL_ACCESS_TOKEN" \
-  https://api.github.com/repos/gjyhj1234/autoagents2/collaborators/copilot-swe-agent%5Bbot%5D \
-  -d '{"permission":"write"}'
-```
-
-> **⚠️ 将 `YOUR_PERSONAL_ACCESS_TOKEN` 替换为你的实际 PAT！**
-
-#### 使用 gh CLI：
-
-```bash
-gh api \
-  --method PUT \
-  -H "Accept: application/vnd.github+json" \
-  /repos/gjyhj1234/autoagents2/collaborators/copilot-swe-agent%5Bbot%5D \
-  -f permission=write
-```
-
-### 5.5 预期结果
-
-- **如果成功** (HTTP 201 或 204): Bot 已被添加为协作者
-- **如果返回 404**: Bot 用户名可能不对，尝试其他名称（见下方 5.6）
-- **如果返回 422**: GitHub 可能不允许将此类 Bot 添加为协作者
-
-### 5.6 如果 `copilot-swe-agent[bot]` 不可用
-
-Copilot Cloud Agent 的底层 GitHub App 名称可能不同。尝试以下变体：
-
-```bash
-# 变体 1: copilot-swe-agent
-curl -s https://api.github.com/users/copilot-swe-agent%5Bbot%5D
-
-# 变体 2: copilot
-curl -s https://api.github.com/users/copilot%5Bbot%5D
-
-# 变体 3: github-copilot
-curl -s https://api.github.com/users/github-copilot%5Bbot%5D
-
-# 变体 4: copilot-coding-agent
-curl -s https://api.github.com/users/copilot-coding-agent%5Bbot%5D
-```
-
-找到返回有效用户信息的那个名称，然后在步骤 5.4 中使用对应的名称。
-
-### 5.7 验证协作者已添加
-
-```bash
-gh api /repos/gjyhj1234/autoagents2/collaborators --jq '.[].login'
-```
-
-或在浏览器中查看：
-
-```
-https://github.com/gjyhj1234/autoagents2/settings/access
-```
+| 编号 | 文件 | 触发方式 | 用途 |
+|------|------|----------|------|
+| 00 | `00-pr-dispatcher.yml` | `schedule`, `workflow_dispatch` | **调度器 — 定时轮询 Copilot PR** |
+| 01 | `01-issue-agent.yml` | `issues`, `workflow_dispatch` | 队列管理 + 分配 Copilot |
+| 02 | `02-pr-tests.yml` | `pull_request_target`, `workflow_dispatch` | 运行 CI 测试 |
+| 03 | `03-auto-merge.yml` | `check_suite`, `pull_request_target`, `pull_request_review`, `workflow_dispatch` | 自动合并 |
+| 04 | `04-label-pr.yml` | `pull_request_target`, `workflow_dispatch` | 标记标签 + 取消 Draft |
+| 05 | `05-auto-approve.yml` | `workflow_run` | 审批安全网（仅 fork PR 有效） |
 
 ---
 
 ## 6. 方案生效验证步骤
 
-完成上述设置后，按以下步骤验证是否生效：
-
-### 步骤 1: 确认当前设置
-
-1. 打开 `https://github.com/gjyhj1234/autoagents2/settings/actions`
-2. 确认 "Approval for running fork pull request workflows from contributors" 已设为最宽松选项
-3. 确认页面已保存
-
-### 步骤 2: 触发新的工作流运行
-
-1. 如果有现存的 Copilot PR（如 PR #36），在 PR 上推送一个空 commit 或让 Copilot 做一个小改动来触发新的工作流运行
-2. 或者创建一个新的 Issue（带 `agent-task` 标签）让 Copilot 创建新 PR
-
-### 步骤 3: 检查工作流状态
+### 步骤 1: 确认调度器运行
 
 1. 打开 Actions 页面：`https://github.com/gjyhj1234/autoagents2/actions`
-2. 查看最新的工作流运行：
-   - ✅ 如果状态为 `queued` → `in_progress` → `success/failure`：**方案生效！**
-   - ❌ 如果状态仍为 `action_required`：需要尝试补充方案（见第 5 节）
+2. 查找 "🚀 00 — PR Dispatcher" 工作流
+3. 每 5 分钟应该有一次运行记录
+4. 也可以手动点击 "Run workflow" 立即触发
 
-### 步骤 4: 验证完整流水线
+### 步骤 2: 创建测试任务
 
-如果单个工作流运行正常，验证完整的自动化链路：
+1. 创建一个带 `agent-task` 标签的 Issue
+2. 等待 Copilot 创建 PR
+3. 观察调度器是否在 5 分钟内自动处理
+
+### 步骤 3: 检查完整流水线
 
 ```
-Issue (agent-task) → 01 分配 Copilot → Copilot 创建 PR
-  → 04 添加标签 + 取消 Draft ✅
-  → 02 运行测试 ✅
-  → 02 触发 03 (workflow_dispatch) ✅
-  → 03 自动合并 ✅
+Issue (agent-task)
+  → 01 分配 Copilot ✅
+  → Copilot 创建 PR ✅
+  → 00 调度器检测到 PR ✅
+  → 04 添加标签 + 取消 Draft ✅ (via workflow_dispatch)
+  → 02 运行测试 ✅ (via workflow_dispatch)
+  → 03 自动合并 ✅ (via workflow_dispatch)
   → 01 处理下一个 Issue ✅
 ```
 
@@ -303,49 +175,33 @@ Issue (agent-task) → 01 分配 Copilot → Copilot 创建 PR
 
 ## 7. FAQ / 常见问题
 
-### Q1: 我在 Settings 里找不到 "Approval for running fork pull request workflows" 选项？
+### Q1: 为什么不直接用 `pull_request_target`？
 
-**A**: 这个选项只在**公开仓库 (public repository)** 中显示。如果你的仓库是私有的：
-- 转到 **Settings → Actions → General**
-- 在 **"Fork pull request workflows"** 区域
-- 确保 **"Require approval for fork pull request workflows"** 未勾选
-- 也可以考虑将仓库改为 Public（如果是演示项目的话）
+**A**: GitHub 文档声称它应该绕过审批，但 Copilot 有自己的平台级安全机制，会覆盖这个行为。实测对 Bot 账户不稳定。我们保留它作为"快速路径"，但不依赖它。
 
-### Q2: 为什么 `pull_request_target` 没有按文档所说绕过审批？
+### Q2: 为什么不把 Bot 添加为协作者？
 
-**A**: GitHub 官方文档明确指出 `pull_request_target` 触发的工作流应该始终运行，不受审批设置影响。但在实际测试中，对于 Bot 账户创建的 PR，这个绕过**不总是有效**。这可能是：
-- GitHub 平台对 Bot/App 账户有额外的安全检查
-- 平台行为与文档之间存在差异
-- 不同时间点的平台行为可能不一致
+**A**: GitHub 协作者 API 只接受 `type: "User"` 的账户。`copilot-swe-agent[bot]` 的类型是 `"Bot"`，API 会返回 HTTP 422 错误。GitHub Apps 通过 Installation 机制工作，不通过协作者机制。
 
-### Q3: 手动批准后，后续运行是否自动？
+### Q3: 5 分钟延迟可以缩短吗？
 
-**A**: **不一定**。即使你选择了 "Require approval for first-time contributors" 并且手动批准过一次：
-- 对于 **普通用户**: 一旦他们有过合并的 PR，后续不再需要审批
-- 对于 **Bot 账户**: 每次可能仍需审批，因为 Bot 的"首次贡献"状态可能不会像普通用户那样更新
+**A**: GitHub Actions 的 `schedule` 最小间隔是 1 分钟（`* * * * *`），但 GitHub 不保证精确执行。5 分钟是一个合理的平衡。如果快速路径（`pull_request_target`）生效，则几乎没有延迟。
 
-### Q4: 添加 Bot 为协作者是否有安全风险？
+### Q4: 调度器会不会重复触发？
 
-**A**: 
-- `copilot-swe-agent[bot]` 是 GitHub 官方管理的 App，本身是可信的
-- 给予 `write` 权限意味着它可以推送代码和管理 PR，这正是 Copilot Cloud Agent 需要的权限
-- **对于私有仓库或包含敏感代码的仓库**，请评估风险后再添加
+**A**: 不会。调度器检查：
+- 是否已有 `auto-merge` 标签 → 如果有则跳过 04
+- 是否已有 `ci/pr-tests` commit status → 如果有则跳过 02
 
-### Q5: 如果所有方案都不行怎么办？
+### Q5: 调度器消耗多少 Actions 分钟数？
 
-**A**: 最终的兜底方案是使用 `workflow_dispatch` + `repository_dispatch` 完全重新设计工作流触发机制：
-- 不依赖 `pull_request` 或 `pull_request_target` 触发器
-- 所有工作流都通过 `workflow_dispatch`（由 `COPILOT_PAT` 触发）启动
-- 在一个"调度器"工作流中监听 PR 事件，然后通过 API 触发其他工作流
-
-这种方案更复杂但可以完全绕过审批机制，因为 `workflow_dispatch` 和 `repository_dispatch` 不受外部贡献者审批策略的影响。
+**A**: 每次运行通常在 10-20 秒内完成（只是 API 调用），每月约 `(60/5) × 24 × 30 = 8640` 次运行，每次 ~15 秒 ≈ 36 小时/月。在免费额度（2000 分钟/月）范围内。
 
 ---
 
 ## 参考链接
 
+- [GitHub Docs: Responsible use of Copilot cloud agent — Avoiding privileged escalation](https://docs.github.com/en/copilot/responsible-use/copilot-cloud-agent#avoiding-privileged-escalation)
 - [GitHub Docs: Managing GitHub Actions settings for a repository](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository)
-- [GitHub Docs: Approving workflow runs from public forks](https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-workflow-runs/approving-workflow-runs-from-public-forks)
-- [GitHub Docs: Managing teams and people with access to your repository](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/managing-teams-and-people-with-access-to-your-repository)
-- [GitHub Docs: About Copilot Cloud Agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent)
+- [GitHub Docs: Events that trigger workflows — workflow_dispatch](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflow_dispatch)
 - [GitHub REST API: Add a repository collaborator](https://docs.github.com/en/rest/collaborators/collaborators#add-a-repository-collaborator)
