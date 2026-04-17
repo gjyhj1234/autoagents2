@@ -3,6 +3,8 @@ name: 🔀 03 — Auto Merge
 on:
   check_suite:
     types: [completed]
+  pull_request:
+    types: [closed]
   pull_request_review:
     types: [submitted]
   workflow_dispatch:
@@ -36,6 +38,56 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const copilotBranchPrefixes = ['feature/task-', 'copilot/'];
+
+            // Helper: clean up linked issues after a PR is merged
+            async function cleanupLinkedIssues(pr) {
+              const linkedIssues = [];
+              const closePatterns = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+              let match;
+              while ((match = closePatterns.exec(pr.body || '')) !== null) {
+                linkedIssues.push(parseInt(match[1]));
+              }
+
+              const taskMatch = pr.title.match(/task[- ]?(\d+)/i) || pr.head.ref.match(/task[- ]?(\d+)/i);
+              if (taskMatch && linkedIssues.length === 0) {
+                const allIssues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'all', per_page: 100 });
+                const taskNum = taskMatch[1].padStart(2, '0');
+                const matchingIssue = allIssues.find(i => !i.pull_request && (i.title.includes(`Task-${taskNum}`) || i.title.includes(`task-${taskNum}`)));
+                if (matchingIssue) linkedIssues.push(matchingIssue.number);
+              }
+
+              for (const issueNum of linkedIssues) {
+                await github.rest.issues.addLabels({ owner, repo, issue_number: issueNum, labels: ['agent-completed'] }).catch(() => {});
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNum, name: 'agent-in-progress' }).catch(() => {});
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNum, name: 'agent-queued' }).catch(() => {});
+                await github.rest.issues.update({ owner, repo, issue_number: issueNum, state: 'closed', state_reason: 'completed' }).catch(() => {});
+              }
+            }
+
+            // When triggered by a merged copilot PR, run cleanup and kick off the next task
+            if (context.eventName === 'pull_request' && context.payload.pull_request.merged) {
+              const pr = context.payload.pull_request;
+              const isCopilotBranch = copilotBranchPrefixes.some(p => pr.head.ref.startsWith(p));
+              if (isCopilotBranch) {
+                console.log(`PR #${pr.number} merged — cleaning up linked issues`);
+                await cleanupLinkedIssues(pr);
+
+                try {
+                  await github.rest.git.deleteRef({ owner, repo, ref: `heads/${pr.head.ref}` });
+                } catch (e) {
+                  console.log(`  Could not delete branch: ${e.message}`);
+                }
+
+                try {
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner, repo, workflow_id: '01-issue-agent.yml', ref: 'main',
+                  });
+                } catch (e) {
+                  console.log(`  Could not trigger Workflow 01: ${e.message}`);
+                }
+              }
+              return;
+            }
 
             const manualPr = context.payload.inputs?.pr_number
               ? parseInt(context.payload.inputs.pr_number)
@@ -121,26 +173,7 @@ jobs:
                   commit_title: `${pr.title} (#${pr.number})`,
                 });
 
-                const linkedIssues = [];
-                const closePatterns = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
-                let match;
-                while ((match = closePatterns.exec(pr.body || '')) !== null) {
-                  linkedIssues.push(parseInt(match[1]));
-                }
-
-                const taskMatch = pr.title.match(/task[- ]?(\d+)/i) || pr.head.ref.match(/task[- ]?(\d+)/i);
-                if (taskMatch && linkedIssues.length === 0) {
-                  const { data: issues } = await github.rest.issues.listForRepo({ owner, repo, state: 'open', per_page: 100 });
-                  const taskNum = taskMatch[1].padStart(2, '0');
-                  const matchingIssue = issues.find(i => i.title.includes(`Task-${taskNum}`) || i.title.includes(`task-${taskNum}`));
-                  if (matchingIssue) linkedIssues.push(matchingIssue.number);
-                }
-
-                for (const issueNum of linkedIssues) {
-                  await github.rest.issues.addLabels({ owner, repo, issue_number: issueNum, labels: ['agent-completed'] }).catch(() => {});
-                  await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNum, name: 'agent-in-progress' }).catch(() => {});
-                  await github.rest.issues.update({ owner, repo, issue_number: issueNum, state: 'closed', state_reason: 'completed' }).catch(() => {});
-                }
+                await cleanupLinkedIssues(pr);
 
                 try {
                   await github.rest.git.deleteRef({ owner, repo, ref: `heads/${pr.head.ref}` });
