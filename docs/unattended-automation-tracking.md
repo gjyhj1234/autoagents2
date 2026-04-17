@@ -2,7 +2,7 @@
 
 > **创建日期**: 2026-04-17  
 > **最后更新**: 2026-04-17  
-> **状态**: 🟢 方案已实现 — `workflow_dispatch` + `schedule` 调度器  
+> **状态**: 🟡 方案已实现 — GitHub 原生调度器 + Windows 桌面自动审批工具  
 
 ---
 
@@ -82,13 +82,15 @@ Copilot 云代理创建的 PR 触发的工作流总是被卡在 `action_required
 
 ---
 
-## 5. 最终解决方案：`workflow_dispatch` + `schedule` 调度器 ✅
+## 5. 最终解决方案 ✅
 
-### 为什么有效
+### 方案 A: `workflow_dispatch` + `schedule` 调度器 (GitHub 原生)
+
+#### 为什么有效
 
 `workflow_dispatch` 和 `schedule` 触发器运行在仓库自身上下文中，**完全不受任何贡献者审批策略影响**。
 
-### 实现细节
+#### 实现细节
 
 | 组件 | 说明 |
 |------|------|
@@ -96,13 +98,48 @@ Copilot 云代理创建的 PR 触发的工作流总是被卡在 `action_required
 | `02-pr-tests.yml` 新增 `workflow_dispatch` | 接受 `pr_number` 输入，由调度器触发 |
 | `04-label-pr.yml` 新增 `workflow_dispatch` | 接受 `pr_number` 输入，由调度器触发 |
 
-### 调度器逻辑
+#### 调度器逻辑
 
 对每个 open 的 Copilot PR：
 1. 检查是否缺少 `auto-merge` 标签 → 触发 04
 2. 检查是否缺少 `ci/pr-tests` commit status → 触发 02
 
-> 📖 **详细文档**：请参阅 [`docs/fix-workflow-approval-guide.md`](fix-workflow-approval-guide.md)
+#### ⚠️ 已知局限
+
+- **新工作流启动延迟**: GitHub 对新增的 scheduled workflow 可能需要最多 1 小时才能开始调度
+- **高负载期不可靠**: 调度任务可能被延迟甚至丢弃
+- **实测**: `00-pr-dispatcher.yml` 创建后 17 分钟仍有零次运行（预期至少 3 次）
+
+### 方案 B: WorkflowApprover 桌面自动审批工具
+
+位于 `src/WorkflowApprover/`，Windows 桌面应用 (WinForms + Edge WebView2)。
+
+#### 工作原理
+
+1. 通过 GitHub REST API 轮询 `action_required` 状态的工作流运行
+2. 使用内嵌 WebView2 浏览器导航到待审批页面
+3. 通过 JavaScript 注入自动点击 "Approve and run" 按钮
+4. 支持配置化的检查间隔（默认 3 分钟）
+5. 浏览器登录状态持久化，重启无需重新登录
+
+#### 优势
+
+- ✅ 不依赖 GitHub 的 schedule 调度器，直接通过浏览器操作
+- ✅ 立即响应，不受 GitHub 平台延迟影响
+- ✅ 自动保存设置和登录状态
+
+#### 要求
+
+- Windows 10/11 + .NET 8.0 + Edge WebView2 Runtime
+
+### 推荐部署
+
+**两层保障**：同时启用方案 A + 方案 B
+
+```
+层 1: GitHub 原生 schedule → 无需额外设施，但有延迟
+层 2: WorkflowApprover      → 立即响应，需要 Windows 机器
+```
 
 ---
 
@@ -125,6 +162,7 @@ Copilot 云代理创建的 PR 触发的工作流总是被卡在 `action_required
 | 2026-04-17 | 初始版本：记录流水线设计、PR #29 阻塞现象及根因分析 |
 | 2026-04-17 | 更新方案状态，新增方案 C (API 添加 Bot 协作者)、方案 D (workflow_dispatch 兜底方案) |
 | 2026-04-17 | **最终方案实现**: 确认添加 Bot 为协作者不可行（API 422），确认 Copilot 有独立的平台级安全机制。实现 `workflow_dispatch` + `schedule` 调度器方案（方案 D），新增 `00-pr-dispatcher.yml`，更新 `02-pr-tests.yml` 和 `04-label-pr.yml` 支持 `workflow_dispatch` 触发 |
+| 2026-04-17 | **补充方案**: 发现 `00-pr-dispatcher.yml` schedule 触发存在启动延迟（创建 17 分钟后零次运行），新增 WorkflowApprover Windows 桌面自动审批工具 (`src/WorkflowApprover/`) 作为可靠补充方案 |
 
 ---
 
@@ -134,3 +172,5 @@ Copilot 云代理创建的 PR 触发的工作流总是被卡在 `action_required
 - 每次遇到新阻塞或解决问题后，应更新此文件
 - 工作流源码位于 `.github/workflows/` 目录下
 - `COPILOT_PAT` secret 用于提权操作（分配 Agent、触发 dispatch、取消 Draft、合并 PR）
+- WorkflowApprover 工具位于 `src/WorkflowApprover/`，详细文档见 [`src/WorkflowApprover/README.md`](../src/WorkflowApprover/README.md)
+- 详细技术文档见 [`docs/fix-workflow-approval-guide.md`](fix-workflow-approval-guide.md)
