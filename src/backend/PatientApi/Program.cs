@@ -24,8 +24,8 @@ var app = builder.Build();
 
 app.UseCors();
 
-var connectionString = Environment.GetEnvironmentVariable("CONNECTION_STRING")
-    ?? throw new InvalidOperationException("CONNECTION_STRING environment variable is not set.");
+var connectionString = app.Configuration["CONNECTION_STRING"]
+    ?? throw new InvalidOperationException("CONNECTION_STRING is not set.");
 
 var repo = new PatientRepository(connectionString);
 
@@ -82,4 +82,7 @@ app.MapDelete("/api/patients/{id:guid}", async (Guid id) =>
 });
 
 app.Run();
+
+// Expose Program class for WebApplicationFactory in test projects
+public partial class Program { }
 
