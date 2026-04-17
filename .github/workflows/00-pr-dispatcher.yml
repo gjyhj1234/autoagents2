@@ -1,0 +1,118 @@
+name: 🚀 00 — PR Dispatcher
+
+# ────────────────────────────────────────────────────────────────
+# Schedule-based dispatcher that polls for new Copilot PRs and
+# triggers downstream workflows via workflow_dispatch.
+#
+# WHY THIS EXISTS:
+# Copilot cloud agent has a built-in security mechanism:
+#   "GitHub Actions workflows triggered in response to pull
+#    requests raised by Copilot cloud agent require approval
+#    from a user with repository write access before they run."
+#
+# This means pull_request / pull_request_target triggers are
+# UNRELIABLE for Copilot-created PRs.  The only trigger types
+# that are NEVER subject to contributor approval are:
+#   - workflow_dispatch
+#   - schedule
+#   - repository_dispatch
+#
+# This workflow runs every 5 minutes (schedule), detects new
+# unprocessed Copilot PRs, and dispatches Workflows 04 and 02
+# via workflow_dispatch using COPILOT_PAT.
+# ────────────────────────────────────────────────────────────────
+on:
+  schedule:
+    - cron: '*/5 * * * *'       # every 5 minutes
+  workflow_dispatch:              # manual trigger for testing
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write
+  issues: read
+
+concurrency:
+  group: pr-dispatcher
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    name: Detect & dispatch Copilot PRs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Find and process Copilot PRs
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.COPILOT_PAT }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const copilotBranchPrefixes = ['feature/task-', 'copilot/'];
+            const copilotAuthors = ['copilot-swe-agent[bot]'];
+
+            // ── 1. List open PRs ──
+            const { data: prs } = await github.rest.pulls.list({
+              owner, repo, state: 'open', per_page: 50,
+            });
+
+            const copilotPRs = prs.filter(pr =>
+              copilotBranchPrefixes.some(p => pr.head.ref.startsWith(p)) ||
+              copilotAuthors.includes(pr.user.login)
+            );
+
+            if (copilotPRs.length === 0) {
+              console.log('No open Copilot PRs found. Nothing to do.');
+              return;
+            }
+
+            for (const pr of copilotPRs) {
+              console.log(`\n── Processing PR #${pr.number}: ${pr.title} ──`);
+              console.log(`   Branch: ${pr.head.ref} | Author: ${pr.user.login} | Draft: ${pr.draft}`);
+
+              // ── 2. Check if label workflow (04) has already run ──
+              const hasAutoMergeLabel = pr.labels.some(l => l.name === 'auto-merge');
+
+              if (!hasAutoMergeLabel) {
+                console.log('   Missing auto-merge label → dispatching 04-label-pr');
+                try {
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner, repo,
+                    workflow_id: '04-label-pr.yml',
+                    ref: 'main',
+                    inputs: { pr_number: String(pr.number) },
+                  });
+                  console.log('   ✅ Dispatched 04-label-pr for PR #' + pr.number);
+                } catch (e) {
+                  console.log('   ❌ Could not dispatch 04: ' + e.message);
+                }
+              } else {
+                console.log('   auto-merge label already present — skipping 04');
+              }
+
+              // ── 3. Check if tests (02) have already run for this SHA ──
+              const { data: combinedStatus } = await github.rest.repos.getCombinedStatusForRef({
+                owner, repo, ref: pr.head.sha,
+              });
+              const ciStatus = combinedStatus.statuses.find(s => s.context === 'ci/pr-tests');
+
+              if (ciStatus) {
+                console.log(`   ci/pr-tests status: ${ciStatus.state} — skipping 02`);
+              } else {
+                console.log('   No ci/pr-tests status found → dispatching 02-pr-tests');
+                try {
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner, repo,
+                    workflow_id: '02-pr-tests.yml',
+                    ref: 'main',
+                    inputs: { pr_number: String(pr.number) },
+                  });
+                  console.log('   ✅ Dispatched 02-pr-tests for PR #' + pr.number);
+                } catch (e) {
+                  console.log('   ❌ Could not dispatch 02: ' + e.message);
+                }
+              }
+            }
+
+            console.log('\n── Dispatch complete ──');
