@@ -1,0 +1,60 @@
+# GitHub Labels for DentalChart Project
+# Run: gh label create <name> --color <hex> --description "<desc>" --repo gjyhj1234/autoagents
+#
+# Or use the setup script: bash scripts/setup-labels.sh
+
+labels:
+  # ── Pipeline State ──────────────────────────────────────────────────────
+  - name: "agent-task"
+    color: "0075ca"
+    description: "Task ready for Copilot Coding Agent — triggers automation pipeline"
+
+  - name: "agent-in-progress"
+    color: "e4e669"
+    description: "Copilot Agent is currently working on this issue"
+
+  - name: "agent-queued"
+    color: "fbca04"
+    description: "Task is queued and waiting for Copilot to pick it up"
+
+  - name: "agent-completed"
+    color: "0e8a16"
+    description: "Agent task completed and merged"
+
+  - name: "auto-merge"
+    color: "6f42c1"
+    description: "PR will be auto-merged after all checks pass"
+
+  # ── Task Type ────────────────────────────────────────────────────────────
+  - name: "infrastructure"
+    color: "d4c5f9"
+    description: "Docker, CI/CD, DevOps"
+
+  - name: "database"
+    color: "c5def5"
+    description: "Database schema, migrations"
+
+  - name: "backend"
+    color: "bfd4f2"
+    description: ".NET 10 backend API"
+
+  - name: "frontend"
+    color: "d2f5b0"
+    description: "Vue 3 frontend"
+
+  - name: "testing"
+    color: "f9d0c4"
+    description: "Tests and QA"
+
+  # ── Standard ─────────────────────────────────────────────────────────────
+  - name: "bug"
+    color: "d73a4a"
+    description: "Something isn't working"
+
+  - name: "enhancement"
+    color: "a2eeef"
+    description: "New feature or improvement"
+
+  - name: "documentation"
+    color: "0075ca"
+    description: "Documentation changes"

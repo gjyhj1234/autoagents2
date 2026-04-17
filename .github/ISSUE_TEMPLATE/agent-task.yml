@@ -1,0 +1,136 @@
+name: 🤖 Agent Task
+description: >
+  Create a task for the Copilot Coding Agent to implement.
+  Add the "agent-task" label to enter the Copilot queue.
+title: "[Task-XX] "
+labels: ["agent-task"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🤖 Automated Task for Copilot Coding Agent
+        Fill in the details below. When you add the **`agent-task`** label, the automation pipeline will:
+        1. 📥 Put the issue into the Copilot queue
+        2. 🤖 Automatically assign the next ready issue to Copilot
+        3. 🛠️ Agent implements the requirements and opens a PR
+        4. 🧪 CI/CD runs automated tests
+        5. ✅ PR auto-merges if all tests pass
+        6. 🔁 Move to the next issue
+
+  - type: input
+    id: task-number
+    attributes:
+      label: Task Number
+      description: Sequential task number (e.g., 01, 02, 03...)
+      placeholder: "03"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of the system does this task affect?
+      options:
+        - 🏗️ Infrastructure / DevOps
+        - 🗄️ Database Schema
+        - 🔷 Backend API (.NET)
+        - 🟢 Frontend (Vue)
+        - 🔷🟢 Full-Stack Feature
+        - 🧪 Testing
+        - 📖 Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What is the goal of this task? (1–3 sentences)
+      placeholder: "Implement the SVG-based tooth chart component with per-surface click interaction..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Functional Requirements
+      description: |
+        List every feature that must be implemented. Be specific and exhaustive.
+        The agent will implement ALL items — nothing can be left out.
+      value: |
+        ### Must Have
+        - [ ] Requirement 1
+        - [ ] Requirement 2
+        - [ ] Requirement 3
+
+        ### Must Have (Backend)
+        - [ ] API endpoint: `GET /api/...`
+        - [ ] API endpoint: `POST /api/...`
+
+        ### Must Have (Frontend)
+        - [ ] Component: `ComponentName.vue`
+
+        ### Database Changes
+        - [ ] New table: `table_name`
+        - [ ] Migration file
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: How do we verify this task is done correctly?
+      value: |
+        - [ ] Unit tests pass (≥ 80% coverage on new code)
+        - [ ] Docker Compose starts without errors
+        - [ ] Feature works end-to-end as described
+        - [ ] No TypeScript errors
+        - [ ] No .NET build warnings
+    validations:
+      required: true
+
+  - type: textarea
+    id: technical-notes
+    attributes:
+      label: Technical Notes
+      description: |
+        Architecture hints, API contracts, data models, or any extra context
+        the agent should know. Reference `.github/copilot-instructions.md` for standards.
+      placeholder: |
+        - Use the `ToothSVG.vue` component pattern from copilot-instructions.md
+        - The tooth numbering must follow ADA Universal Numbering System
+        - See `docs/tasks/04-frontend-chart.md` for the full SVG spec
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - 🔴 Critical (blocks other tasks)
+        - 🟠 High
+        - 🟡 Medium
+        - 🟢 Low
+    validations:
+      required: true
+
+  - type: input
+    id: depends-on
+    attributes:
+      label: Depends On
+      description: Issue numbers this task depends on (comma-separated)
+      placeholder: "#1, #2"
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have updated the task number in the title (e.g., `[Task-05]`)
+          required: true
+        - label: I have read `.github/copilot-instructions.md`
+          required: true
+        - label: All requirements are specific and actionable (not vague)
+          required: true
