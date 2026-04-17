@@ -2,7 +2,8 @@
 
 > **创建日期**: 2026-04-17  
 > **最后更新**: 2026-04-17  
-> **目标**: 让 `copilot-swe-agent[bot]` 创建的 PR 不再需要人工审批即可运行 CI 工作流
+> **目标**: 让 `copilot-swe-agent[bot]` 创建的 PR 不再需要人工审批即可运行 CI 工作流  
+> **最终方案**: GitHub 原生调度器 (`workflow_dispatch` + `schedule`) + Windows 桌面自动审批工具 (`WorkflowApprover`)
 
 ---
 
@@ -204,4 +205,54 @@ Issue (agent-task)
 - [GitHub Docs: Responsible use of Copilot cloud agent — Avoiding privileged escalation](https://docs.github.com/en/copilot/responsible-use/copilot-cloud-agent#avoiding-privileged-escalation)
 - [GitHub Docs: Managing GitHub Actions settings for a repository](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository)
 - [GitHub Docs: Events that trigger workflows — workflow_dispatch](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflow_dispatch)
+- [GitHub Docs: Events that trigger workflows — schedule](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule)
 - [GitHub REST API: Add a repository collaborator](https://docs.github.com/en/rest/collaborators/collaborators#add-a-repository-collaborator)
+
+---
+
+## 8. 补充方案：WorkflowApprover 桌面自动审批工具
+
+### 为什么需要补充方案
+
+`workflow_dispatch` + `schedule` 调度器是正确的 GitHub 原生方案，但存在实际可靠性问题：
+
+1. **新工作流的调度延迟**: GitHub 对新增的 scheduled workflow 可能需要**最多 1 小时**才能开始首次调度
+2. **高负载期延迟**: GitHub 文档明确说明 *"The schedule event can be delayed during periods of high loads of GitHub Actions workflow runs"*，高峰期调度任务甚至可能被**丢弃**
+3. **公开仓库自动禁用**: 公开仓库 60 天无活动后，scheduled workflow 会被自动禁用
+
+### 实测数据
+
+| 指标 | 值 |
+|------|------|
+| `00-pr-dispatcher.yml` 创建时间 | 2026-04-17 13:54 UTC |
+| 截至检查时间 | 2026-04-17 14:11 UTC (17 分钟后) |
+| 实际调度运行次数 | **0 次** |
+| 期望运行次数 (每 5 分钟) | 至少 3 次 |
+
+### WorkflowApprover 工具
+
+位于 `src/WorkflowApprover/`，是一个 Windows 桌面应用 (WinForms + WebView2)：
+
+1. **自动检测**: 通过 GitHub REST API 轮询 `action_required` 状态的工作流运行
+2. **自动审批**: 使用内嵌 WebView2 浏览器导航到待审批页面，通过 JavaScript 注入点击 "Approve and run"
+3. **持久化**: 浏览器登录状态和配置自动保存，重启无需重新登录
+4. **可靠性**: 不依赖 GitHub 的 schedule 机制，直接通过浏览器操作
+
+### 推荐部署方式
+
+**两层保障架构**：
+
+```
+层 1: GitHub 原生 (00-pr-dispatcher.yml + schedule)
+  └─ 优点: 无需额外设施，纯 GitHub 方案
+  └─ 缺点: 有调度延迟，新工作流启动慢
+
+层 2: WorkflowApprover (Windows 桌面应用)
+  └─ 优点: 立即响应，不受 GitHub 调度器限制
+  └─ 缺点: 需要一台 Windows 机器运行
+
+当层 1 的调度器最终开始运行后，审批需求会大幅减少。
+WorkflowApprover 作为即时补充，确保流水线不会停滞。
+```
+
+详细使用说明见 [`src/WorkflowApprover/README.md`](../src/WorkflowApprover/README.md)。
