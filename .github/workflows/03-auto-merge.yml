@@ -3,7 +3,9 @@ name: 🔀 03 — Auto Merge
 on:
   check_suite:
     types: [completed]
-  pull_request:
+  # pull_request_target runs on the base branch context, so it does NOT
+  # require maintainer approval for first-time / outside contributors.
+  pull_request_target:
     types: [closed]
   pull_request_review:
     types: [submitted]
@@ -65,7 +67,8 @@ jobs:
             }
 
             // When triggered by a merged copilot PR, run cleanup and kick off the next task
-            if (context.eventName === 'pull_request' && context.payload.pull_request.merged) {
+            // Note: uses pull_request_target so eventName is 'pull_request_target'
+            if ((context.eventName === 'pull_request_target' || context.eventName === 'pull_request') && context.payload.pull_request.merged) {
               const pr = context.payload.pull_request;
               const isCopilotBranch = copilotBranchPrefixes.some(p => pr.head.ref.startsWith(p));
               if (isCopilotBranch) {
@@ -145,9 +148,13 @@ jobs:
                 owner, repo, ref: pr.head.sha, per_page: 100,
               });
 
+              // Exclude non-CI workflows from merge eligibility checks
+              const excludedPatterns = [
+                'Auto Merge', 'auto-merge', 'Auto-Merge', 'Evaluate PRs',
+                'Label', 'Auto-approve', 'approve Copilot',
+              ];
               const relevantChecks = checkRuns.check_runs.filter(
-                c => !c.name.includes('Auto Merge') && !c.name.includes('auto-merge')
-                  && !c.name.includes('Auto-Merge') && !c.name.includes('Evaluate PRs')
+                c => !excludedPatterns.some(p => c.name.includes(p))
               );
 
               const allCompleted = relevantChecks.every(c => c.status === 'completed');
