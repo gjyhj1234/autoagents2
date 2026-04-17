@@ -35,6 +35,13 @@ jobs:
             const hasLabel = (issue, name) => issue.labels.some(label => label.name === name);
             const isTaskIssue = (issue) => !issue.pull_request && hasLabel(issue, 'agent-task');
 
+            // When an issue is closed, remove all status labels from it and move on to queue logic
+            if (context.eventName === 'issues' && context.payload.action === 'closed') {
+              const closedNum = context.payload.issue.number;
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: closedNum, name: 'agent-in-progress' }).catch(() => {});
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: closedNum, name: 'agent-queued' }).catch(() => {});
+            }
+
             async function setStatusLabels(issueNumber, makeActive) {
               const add = makeActive ? 'agent-in-progress' : 'agent-queued';
               const remove = makeActive ? 'agent-queued' : 'agent-in-progress';
