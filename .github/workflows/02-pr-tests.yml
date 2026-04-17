@@ -255,7 +255,7 @@ jobs:
         with:
           github-token: ${{ secrets.COPILOT_PAT }}
           script: |
-            const prNumber = '${{ needs.resolve-pr.outputs.pr_number }}';
+            const prNumber = parseInt('${{ needs.resolve-pr.outputs.pr_number }}');
             try {
               await github.rest.actions.createWorkflowDispatch({
                 owner: context.repo.owner,
@@ -263,7 +263,7 @@ jobs:
                 workflow_id: '03-auto-merge.yml',
                 ref: 'main',
                 inputs: {
-                  pr_number: prNumber,
+                  pr_number: String(prNumber),
                 },
               });
               console.log('Triggered auto-merge evaluation for PR #' + prNumber);
