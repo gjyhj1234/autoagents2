@@ -148,11 +148,13 @@ jobs:
                 owner, repo, ref: pr.head.sha, per_page: 100,
               });
 
+              // Exclude non-CI workflows from merge eligibility checks
+              const excludedPatterns = [
+                'Auto Merge', 'auto-merge', 'Auto-Merge', 'Evaluate PRs',
+                'Label', 'Auto-approve', 'approve Copilot',
+              ];
               const relevantChecks = checkRuns.check_runs.filter(
-                c => !c.name.includes('Auto Merge') && !c.name.includes('auto-merge')
-                  && !c.name.includes('Auto-Merge') && !c.name.includes('Evaluate PRs')
-                  && !c.name.includes('Label') && !c.name.includes('Auto-approve')
-                  && !c.name.includes('approve Copilot')
+                c => !excludedPatterns.some(p => c.name.includes(p))
               );
 
               const allCompleted = relevantChecks.every(c => c.status === 'completed');

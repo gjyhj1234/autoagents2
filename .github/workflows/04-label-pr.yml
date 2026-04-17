@@ -47,8 +47,8 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const headSha = context.payload.pull_request.head.sha;
-            const maxAttempts = 12;   // 12 attempts
-            const delayMs = 15_000;  // 15 seconds between attempts
+            const maxAttempts = 12;   // 12 × 15s ≈ 3 min total
+            const delayMs = 15_000;
             let totalApproved = 0;
 
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -75,8 +75,7 @@ jobs:
                 console.log(`[attempt ${attempt}] No pending runs found.`);
               }
 
-              // After first successful approval and no more pending runs, wait one
-              // more cycle to catch any late-arriving runs, then stop.
+              // After approving runs, if no more are pending, stop early.
               if (totalApproved > 0 && runsData.total_count === 0 && attempt > 1) {
                 console.log('All pending runs approved — done.');
                 break;
