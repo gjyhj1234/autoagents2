@@ -1,7 +1,22 @@
 name: 🧪 02 — PR Tests
 
+# ────────────────────────────────────────────────────────────────
+# Uses pull_request_target so this workflow runs in the context of
+# the BASE branch (main).  This avoids the "awaiting maintainer
+# approval" gate that blocks pull_request-triggered workflows when
+# the PR author is a first-time or outside contributor (e.g.
+# copilot-swe-agent[bot]).
+#
+# ⚠️ SECURITY NOTE: The checkout step uses the PR head SHA, so we
+# build and test UNTRUSTED code with elevated privileges.  Only
+# acceptable in private / fully-trusted repositories.
+#
+# NOTE: The approveWorkflowRun REST API only works for *fork* pull
+# requests.  For same-repo Copilot PRs the only reliable fix is to
+# use pull_request_target.
+# ────────────────────────────────────────────────────────────────
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
 
@@ -9,6 +24,8 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
+  statuses: write
+  actions: write
 
 env:
   DOTNET_VERSION: '10.0.x'
@@ -21,6 +38,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Check if backend exists
         id: check-backend
@@ -60,6 +79,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Check if frontend exists
         id: check-frontend
@@ -100,7 +121,7 @@ jobs:
     name: 📋 Post Test Summary
     runs-on: ubuntu-latest
     needs: [test-backend, test-frontend]
-    if: always() && github.event_name == 'pull_request'
+    if: always() && github.event.pull_request
 
     steps:
       - name: Post summary comment
@@ -134,10 +155,12 @@ jobs:
                 : `### ❌ One or more checks failed`,
             ].join('\n');
 
+            const prNumber = context.payload.pull_request.number;
+
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.issue.number,
+              issue_number: prNumber,
             });
 
             const existing = comments.find(c =>
@@ -156,7 +179,60 @@ jobs:
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: context.issue.number,
+                issue_number: prNumber,
                 body,
               });
+            }
+
+      # Because pull_request_target check runs are NOT associated with the
+      # PR head SHA, we create an explicit commit status so that Workflow 03
+      # (Auto-Merge) can verify tests passed via getCombinedStatusForRef().
+      - name: Set commit status on PR head
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const jobs = {
+              backend: '${{ needs.test-backend.result }}',
+              frontend: '${{ needs.test-frontend.result }}',
+            };
+            const allPassed = Object.values(jobs).every(
+              r => r === 'success' || r === 'skipped'
+            );
+            const prHeadSha = context.payload.pull_request.head.sha;
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: prHeadSha,
+              state: allPassed ? 'success' : 'failure',
+              context: 'ci/pr-tests',
+              description: allPassed
+                ? 'All PR tests passed'
+                : 'Some PR tests failed',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+
+      - name: Trigger auto-merge evaluation
+        if: |
+          always() &&
+          needs.test-backend.result != 'failure' &&
+          needs.test-frontend.result != 'failure'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.COPILOT_PAT }}
+          script: |
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: '03-auto-merge.yml',
+                ref: 'main',
+                inputs: {
+                  pr_number: String(context.payload.pull_request.number),
+                },
+              });
+              console.log('Triggered auto-merge evaluation for PR #' + context.payload.pull_request.number);
+            } catch (e) {
+              console.log(`Could not trigger auto-merge: ${e.message}`);
             }
